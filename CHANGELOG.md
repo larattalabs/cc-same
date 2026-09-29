@@ -3,7 +3,7 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
-## Unreleased
+## 0.1.4 - 2026-09-30
 
 ### Fixed
 
