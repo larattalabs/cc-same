@@ -3,6 +3,18 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## 0.1.2 - 2026-09-29
+
+### Fixed
+
+- **Background sync on macOS never started.** The switch stayed at “starting…” and then said “On,
+  but not running”. The app set the agent up as a copy of its own program, and macOS refuses to run
+  that program outside the app. The agent now runs the app’s program where it is, and an agent set
+  up by 0.1.0 or 0.1.1 is set up again the next time the app opens. Run from a disk image, the app
+  first asks to be moved to the Applications folder.
+- **System Settings lists the background item as CC Same**, with its icon. 0.1.1 meant to, but
+  the copy stood in the way.
+
 ## 0.1.1 - 2026-09-29
 
 ### New
