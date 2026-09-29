@@ -1,12 +1,14 @@
 //! `cc-same`: keep Claude Desktop's local sessions identical across all your accounts.
 
 use anyhow::{bail, Result};
+use cc_same_core::logins::{self, Target};
 use cc_same_core::report::{self, Overview, Warning};
 use cc_same_core::retention::{self, Kept, Limit};
 use cc_same_core::service::{self, Heartbeat};
 use cc_same_core::watch::{self, WatchOptions};
-use cc_same_core::{apply, plan, short, snapshot, Config, Ctx, FakeDesktop, LogSink, Paths, State, Surface};
+use cc_same_core::{apply, plan, scan, short, snapshot, Config, Ctx, FakeDesktop, LogSink, Paths, State, Surface};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -91,6 +93,20 @@ enum Cmd {
         /// Put back the setting CC Same changed
         #[arg(long, conflicts_with = "days")]
         undo: bool,
+    },
+    /// Your accounts: which one Claude is signed in to, and which it can switch to
+    Accounts,
+    /// Switch Claude to another account (Claude restarts if it is open)
+    Switch {
+        /// The account's email address, or the start of its ID
+        account: String,
+    },
+    /// Restart Claude signed out, to sign in to another account; the current one is kept
+    SignIn,
+    /// Delete the sign-in CC Same keeps for an account
+    Forget {
+        /// The account's email address, or the start of its ID
+        account: String,
     },
     /// Show or change settings
     Config {
@@ -184,6 +200,31 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Cmd::Retention { days, keep, undo } => retention(&ctx, days, keep, undo),
+        Cmd::Accounts => accounts(&ctx),
+        Cmd::Switch { account } => {
+            let (id, name) = account_named(&ctx, &account)?;
+            let switched = logins::switch(&ctx, Target::Account(&id))?;
+            let restarted = if switched.launched { " (restarted)" } else { "" };
+            println!("Claude is signed in to {name}{restarted}.");
+            Ok(())
+        }
+        Cmd::SignIn => {
+            let switched = logins::switch(&ctx, Target::SignedOut)?;
+            let labels = scan::account_labels(&ctx);
+            if let Some(from) = &switched.from {
+                let name = labels.get(from).cloned().unwrap_or_else(|| format!("Account {}", short(from)));
+                println!("Set {name} aside: `cc-same switch {name}` brings it back.");
+            }
+            println!("Claude is open on its sign-in page: sign in to the other account there.");
+            println!("To switch later, use `cc-same switch`: Log out in Claude ends a sign-in for good.");
+            Ok(())
+        }
+        Cmd::Forget { account } => {
+            let (id, name) = account_named(&ctx, &account)?;
+            logins::forget(&ctx, &id)?;
+            println!("Deleted the sign-in kept for {name}.");
+            Ok(())
+        }
         Cmd::Config { surfaces, exclude, include, auto_join, notify } => {
             let mut cfg = ctx.config();
             let before = cfg.clone();
@@ -450,6 +491,65 @@ fn install(ctx: &Ctx, yes: bool) -> Result<()> {
     println!("Log: {}", ctx.paths.log_file.display());
     if !out.seeded_while_loaded.is_empty() {
         println!("Quit and reopen Claude once to see the sessions copied into the account it has open.");
+    }
+    Ok(())
+}
+
+/// Every account CC Same knows, by ID, with its email when known.
+fn known_accounts(ctx: &Ctx) -> BTreeMap<String, String> {
+    let labels = scan::account_labels(ctx);
+    let found = logins::list(ctx);
+    let mut ids: Vec<String> = scan::discover(ctx, Surface::Code).into_iter().map(|p| p.acct).collect();
+    ids.extend(found.saved.iter().map(|s| s.account.clone()));
+    ids.extend(found.signed_in.clone());
+    ids.into_iter()
+        .map(|id| {
+            let saved_email = found.saved(&id).and_then(|s| s.email.clone());
+            let name = labels.get(&id).cloned().or(saved_email).unwrap_or_else(|| format!("Account {}", short(&id)));
+            (id, name)
+        })
+        .collect()
+}
+
+/// The one account `query` names: its email, or the start of its ID.
+fn account_named(ctx: &Ctx, query: &str) -> Result<(String, String)> {
+    let query = query.trim();
+    let matches: Vec<(String, String)> = known_accounts(ctx)
+        .into_iter()
+        .filter(|(id, name)| name.eq_ignore_ascii_case(query) || (query.len() >= 4 && id.starts_with(query)))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => bail!("no account called {query} (see `cc-same accounts`)"),
+        _ => bail!("{query} could be {}", matches.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" or ")),
+    }
+}
+
+fn accounts(ctx: &Ctx) -> Result<()> {
+    let found = logins::list(ctx);
+    let known = known_accounts(ctx);
+    if known.is_empty() {
+        println!("No accounts yet: sign in to Claude.");
+        return Ok(());
+    }
+    let width = known.values().map(|n| n.chars().count()).max().unwrap_or(0);
+    for (id, name) in &known {
+        let state = if found.signed_in.as_deref() == Some(id.as_str()) {
+            "signed in".to_string()
+        } else if let Some(saved) = found.saved(id) {
+            let since = report::ago(saved.set_aside_at);
+            if saved.stale() {
+                format!("switch with `cc-same switch` (last used {since}; may need signing in again)")
+            } else {
+                format!("switch with `cc-same switch` (last used {since})")
+            }
+        } else {
+            "sign in once to switch here: `cc-same sign-in`".to_string()
+        };
+        println!("  {name:width$}  {state}");
+    }
+    if !found.supported {
+        println!("Switching accounts is not supported on this system yet.");
     }
     Ok(())
 }

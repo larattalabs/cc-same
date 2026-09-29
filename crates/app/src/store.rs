@@ -6,6 +6,8 @@ use crate::model::{self, Account, Busy, Mood};
 use crate::theme::ThemeChoice;
 use crate::update::{self, Failure, Problem, Release};
 use cc_same_core::config::Config;
+use cc_same_core::desktop::NotReady;
+use cc_same_core::logins::{self, Refused, Target};
 use cc_same_core::report::{self, Overview};
 use cc_same_core::retention::{self, Kept};
 use cc_same_core::snapshot::{self, Manifest};
@@ -30,6 +32,15 @@ const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 /// Something the user should hear about: the outcome of a task they started.
 pub enum StoreEvent {
     Done(Result<String, String>),
+}
+
+/// Claude was restarted on its sign-in page, to sign in to another account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SigningIn {
+    /// The account set aside to make room, to switch back to.
+    pub previous: Option<String>,
+    /// The account the user meant to sign in to, by name, when they picked one.
+    pub expected: Option<String>,
 }
 
 /// Where an update stands.
@@ -84,6 +95,10 @@ pub struct Store {
     /// When the background switch was last turned on: the agent gets a moment to start.
     pub switched_on_at: Option<Instant>,
     pub updates: Updates,
+    /// The account a switch is heading for.
+    pub switching_to: Option<String>,
+    /// Waiting for a sign-in to another account in Claude.
+    pub signing_in: Option<SigningIn>,
     refreshing: bool,
     /// The background agent was compared with this version once.
     agent_checked: bool,
@@ -107,6 +122,8 @@ impl Store {
             open_at_login: false,
             switched_on_at: None,
             updates: Updates::default(),
+            switching_to: None,
+            signing_in: None,
             refreshing: false,
             agent_checked: false,
             fingerprint: 0,
@@ -120,6 +137,9 @@ impl Store {
             let mut store = Store::blank(ctx);
             store.open_at_login = crate::login::enabled();
             store.updates.updated_from = update::updated_from(&store.ctx.paths).map(|v| v.to_string());
+            // Finish an account switch a crash cut short, before Claude is next opened.
+            let ctx = store.ctx.clone();
+            cx.background_executor().spawn(async move { logins::recover_if_idle(&ctx) }).detach();
             store.refresh(cx);
             store.watch_for_changes(cx);
             store.watch_for_updates(cx);
@@ -185,9 +205,18 @@ impl Store {
                     (true, since) => since,
                     (false, _) => None,
                 };
+                let signed_in = overview.logins.signed_in.clone();
                 this.overview = Some(Arc::new(overview));
                 this.snapshots = snapshots;
                 this.renew_agent(cx);
+                // Claude was waiting on its sign-in page, and now someone signed in.
+                if this.busy.is_none()
+                    && let (Some(_), Some(account)) = (&this.signing_in, signed_in)
+                {
+                    this.signing_in = None;
+                    let name = this.account_name(&account);
+                    cx.emit(StoreEvent::Done(Ok(tf("toast.added", &[("account", &name)]))));
+                }
                 cx.notify();
             });
         })
@@ -564,6 +593,75 @@ impl Store {
         }
     }
 
+    // ------------------------------------------------------------------ accounts
+
+    /// Switch Claude to `account`: Claude quits and starts again if it is open.
+    pub fn switch_account(&mut self, account: String, cx: &mut Context<Self>) {
+        self.run_switch(Some(account), None, cx);
+    }
+
+    /// Restart Claude on its sign-in page, to sign in to another account: the account in use is
+    /// set aside, ready to switch back to. `expected` names the account the user means to add.
+    pub fn sign_in_another(&mut self, expected: Option<String>, cx: &mut Context<Self>) {
+        self.run_switch(None, expected, cx);
+    }
+
+    fn run_switch(&mut self, to: Option<String>, expected: Option<String>, cx: &mut Context<Self>) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some(Busy::Switching);
+        self.switching_to = to.clone();
+        cx.notify();
+        let ctx = self.ctx.clone();
+        cx.spawn(async move |this, cx| {
+            let target = to.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match &target {
+                        Some(account) => logins::switch(&ctx, Target::Account(account)),
+                        None => logins::switch(&ctx, Target::SignedOut),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = None;
+                this.switching_to = None;
+                match result {
+                    Ok(switched) => match &switched.to {
+                        Some(account) => {
+                            this.signing_in = None;
+                            let name = this.account_name(account);
+                            cx.emit(StoreEvent::Done(Ok(tf("toast.switched", &[("account", &name)]))));
+                        }
+                        None => this.signing_in = Some(SigningIn { previous: switched.from, expected }),
+                    },
+                    Err(error) => cx.emit(StoreEvent::Done(Err(explain_switch(&error)))),
+                }
+                this.refresh(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Delete the sign-in kept for `account`.
+    pub fn forget_sign_in(&mut self, account: String, cx: &mut Context<Self>) {
+        self.run_task(Busy::Saving, cx, move |ctx| {
+            logins::forget(ctx, &account)?;
+            Ok(t("toast.forgot"))
+        });
+    }
+
+    /// An account's name as the window shows it.
+    pub fn account_name(&self, id: &str) -> String {
+        if let Some(account) = self.accounts().into_iter().find(|a| a.id == id) {
+            return account.name;
+        }
+        let saved = self.overview.as_ref().and_then(|o| o.logins.saved(id).and_then(|s| s.email.clone()));
+        saved.unwrap_or_else(|| tf("account.unnamed", &[("id", &cc_same_core::short(id))]))
+    }
+
     /// Change a setting now and save it in the background.
     pub fn update_config(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Config)) {
         let mut cfg = self.ctx.config();
@@ -579,6 +677,23 @@ impl Store {
             })
             .detach();
     }
+}
+
+/// Why a switch did not happen, in words people can act on.
+fn explain_switch(error: &anyhow::Error) -> String {
+    if let Some(refused) = error.downcast_ref::<Refused>() {
+        return t(match refused {
+            Refused::Unsupported => "switch.unsupported",
+            Refused::NothingSaved => "switch.nothing_saved",
+        });
+    }
+    if let Some(not_ready) = error.downcast_ref::<NotReady>() {
+        return t(match not_ready {
+            NotReady::StillOpen => "switch.still_open",
+            NotReady::Updating => "switch.updating",
+        });
+    }
+    format!("{error:#}")
 }
 
 /// Whether the registered agent has to be set up again from this app, on macOS: it is the copy

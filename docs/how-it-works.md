@@ -192,6 +192,37 @@ Claude Code it raises `cleanupPeriodDays` to ten years instead), backs up the se
 and can be undone with **Undo** or `cc-same retention --undo`. Don't set `cleanupPeriodDays` to
 `0`: Claude Code rejects it.
 
+## Switching accounts
+
+Claude Desktop keeps one sign-in: the claude.ai web session (the `Cookies` database and the
+`Local Storage`, `Session Storage`, `IndexedDB` and `WebStorage` folders) and the tokens it caches
+in `config.json` (`oauth:tokenCache`, `oauth:tokenCacheV2`, `lastKnownAccountUuid`), all encrypted
+with a key in the login keychain. Signing out ends that sign-in on the server, so switching by
+signing out and in again loses it.
+
+CC Same switches without signing out (macOS for now):
+
+1. It asks Claude to quit, the way the Dock does (SIGTERM, so no "control Claude" permission is
+   needed), waits for it and its helpers to exit and for its updater to finish, and takes the
+   sync lock.
+2. It moves Claude's sign-in, as it is, to `<state>/logins/<account>` (a rename on the same disk;
+   the account is `lastKnownAccountUuid`), and moves the target account's back in its place: the
+   files as they were, and the `config.json` keys written back in Claude's own format.
+   `bridge-state.json`, tied to the old account, is dropped; Claude makes it again.
+3. It starts Claude again if it was running.
+
+Nothing is decrypted, read, refreshed or sent anywhere: Claude's own files move between two
+folders on the same Mac. Tokens rotate while Claude runs, so the sign-in being left is saved afresh
+at every switch, and a saved copy is put back only once. Every move is written to a journal first:
+a failed switch is undone, and one cut short (a crash) is undone or finished the next time.
+
+To add an account, CC Same sets the current sign-in aside and restarts Claude on its sign-in page;
+signing in there goes through Anthropic's own flow as usual, and CC Same takes note once Claude has
+a new sign-in. A sign-in left unused for about four weeks expires on the server; Claude then asks
+to sign in again, and nothing else is lost. The command line does the same with `cc-same switch`,
+`cc-same sign-in` and `cc-same forget`. The Claude Code command line has its own sign-in, which
+this leaves alone; one `CLAUDE_CONFIG_DIR` per account is Anthropic's way to keep several.
+
 ## What cannot be synced from the outside
 
 - **Sidebar groups and order.** Desktop keeps them per account and organization in its web

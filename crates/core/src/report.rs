@@ -77,6 +77,8 @@ pub struct Overview {
     pub warnings: Vec<Warning>,
     /// How long Claude Code keeps the transcripts behind these sessions.
     pub retention: crate::retention::Retention,
+    /// Who Claude is signed in to, and the sign-ins set aside for switching.
+    pub logins: crate::logins::Logins,
     pub service: ServiceStatus,
     pub heartbeat: Option<Heartbeat>,
     pub last_sync: Option<LastSync>,
@@ -224,6 +226,7 @@ pub fn overview(ctx: &Ctx) -> Overview {
         plan: summarize(&plan),
         warnings,
         retention,
+        logins: crate::logins::list(ctx),
         service: service::status(ctx),
         heartbeat: Heartbeat::read(&ctx.paths),
         last_sync: state.last_sync.clone(),

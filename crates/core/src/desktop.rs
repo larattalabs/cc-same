@@ -82,6 +82,67 @@ pub fn is_running(ctx: &Ctx) -> bool {
     process::desktop_running().unwrap_or(true)
 }
 
+/// Why Claude could not be made ready for a change to its sign-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotReady {
+    /// Claude did not quit: it may be asking something, or a task keeps it open.
+    StillOpen,
+    /// Claude's updater is replacing the app.
+    Updating,
+}
+
+impl std::fmt::Display for NotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            NotReady::StillOpen => "Claude did not quit, so nothing was changed",
+            NotReady::Updating => "Claude is updating; try again in a minute",
+        })
+    }
+}
+
+impl std::error::Error for NotReady {}
+
+/// Ask Claude to quit, the way the Dock's Quit does, and wait up to `timeout` for it and its
+/// helpers to be gone. Claude may ask first (about running tasks, say); the user answers there.
+pub fn quit(ctx: &Ctx, timeout: Duration) -> anyhow::Result<()> {
+    if ctx.fake.running.is_some() {
+        return Ok(());
+    }
+    process::ask_to_quit();
+    let deadline = Instant::now() + timeout;
+    while process::any_running() {
+        if Instant::now() >= deadline {
+            return Err(NotReady::StillOpen.into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+/// Wait up to `timeout` while Claude's updater replaces the app: starting Claude, or changing
+/// its data, in the middle of that leaves it broken.
+pub fn wait_for_update(ctx: &Ctx, timeout: Duration) -> anyhow::Result<()> {
+    if ctx.fake.running.is_some() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + timeout;
+    while process::updating() {
+        if Instant::now() >= deadline {
+            return Err(NotReady::Updating.into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Ok(())
+}
+
+/// Start Claude.
+pub fn launch(ctx: &Ctx) -> anyhow::Result<()> {
+    if ctx.fake.running.is_some() {
+        return Ok(());
+    }
+    process::launch()
+}
+
 pub fn last_known_account(ctx: &Ctx) -> Option<String> {
     let Ok(Value::Object(cfg)) = fsx::read_json(&ctx.paths.desktop_config(), 16 * 1024 * 1024) else {
         return None;
@@ -203,8 +264,19 @@ pub fn desktop_version() -> Option<String> {
 mod process {
     //! A tiny process-table reader per platform, just enough to spot Claude Desktop.
 
+    /// Claude Desktop's main executable.
     #[cfg(target_os = "macos")]
-    pub fn desktop_running() -> Option<bool> {
+    const MAIN: &[u8] = b"Claude.app/Contents/MacOS/Claude";
+    /// Where everything Claude Desktop runs lives: the app and its helpers.
+    #[cfg(target_os = "macos")]
+    const BUNDLE: &[u8] = b"Claude.app/Contents/";
+    /// Squirrel's installer, which replaces the app during an update.
+    #[cfg(target_os = "macos")]
+    const UPDATER: &[u8] = b"Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt";
+
+    /// Process ids whose executable path `matches`; `None` when the table cannot be read.
+    #[cfg(target_os = "macos")]
+    fn pids(matches: impl Fn(&[u8]) -> bool) -> Option<Vec<i32>> {
         let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
         if count <= 0 {
             return None;
@@ -216,16 +288,77 @@ mod process {
             return None;
         }
         let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let mut found = Vec::new();
         for &pid in pids.iter().take(count as usize) {
             if pid <= 0 {
                 continue;
             }
             let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
-            if n > 0 && path[..n as usize].ends_with(b".app/Contents/MacOS/Claude") {
-                return Some(true);
+            if n > 0 && matches(&path[..n as usize]) {
+                found.push(pid);
             }
         }
-        Some(false)
+        Some(found)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn desktop_running() -> Option<bool> {
+        pids(|p| p.ends_with(MAIN)).map(|found| !found.is_empty())
+    }
+
+    /// Claude or any of its helpers, but not its updater.
+    #[cfg(target_os = "macos")]
+    pub fn any_running() -> bool {
+        pids(|p| contains(p, BUNDLE) && !p.ends_with(UPDATER)).is_none_or(|found| !found.is_empty())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn updating() -> bool {
+        pids(|p| p.ends_with(UPDATER)).is_some_and(|found| !found.is_empty())
+    }
+
+    /// SIGTERM: Electron quits the way it does from the Dock or the menu, without the
+    /// "control Claude" permission prompt an Apple Event would bring.
+    #[cfg(target_os = "macos")]
+    pub fn ask_to_quit() {
+        for pid in pids(|p| p.ends_with(MAIN)).unwrap_or_default() {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn launch() -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let status = std::process::Command::new("/usr/bin/open")
+            .args(["-b", "com.anthropic.claudefordesktop"])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .context("starting Claude")?;
+        anyhow::ensure!(status.success(), "could not start Claude ({status})");
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn any_running() -> bool {
+        desktop_running().unwrap_or(true)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn updating() -> bool {
+        false
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn ask_to_quit() {}
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn launch() -> anyhow::Result<()> {
+        anyhow::bail!("starting Claude is not supported on this system yet")
     }
 
     #[cfg(target_os = "linux")]

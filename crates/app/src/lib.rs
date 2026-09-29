@@ -209,6 +209,22 @@ fn on_tray(command: Command, cx: &mut App) {
             show_window(cx);
             store.update(cx, |s, cx| s.update_or_check(cx));
         }
+        Command::SwitchTo(account) => store.update(cx, |s, cx| s.switch_account(account, cx)),
+        Command::SignInAnother => {
+            // The window explains first: Claude restarts signed out.
+            show_window(cx);
+            cx.defer(|cx| {
+                for handle in cx.windows() {
+                    let _ = handle.update(cx, |root, window, cx| {
+                        if let Ok(root) = root.downcast::<gpui_kit::component::Root>()
+                            && let Ok(view) = root.read(cx).view().clone().downcast::<view::UniApp>()
+                        {
+                            view.update(cx, |view, cx| view.confirm_sign_in(None, window, cx));
+                        }
+                    });
+                }
+            });
+        }
         Command::Quit => quit(cx),
     }
 }

@@ -20,11 +20,12 @@ fn main() -> anyhow::Result<()> {
 mod mac {
     use cc_same_app::i18n;
     use cc_same_app::model::Busy;
-    use cc_same_app::store::{Store, UpdatePhase, Updates};
+    use cc_same_app::store::{SigningIn, Store, UpdatePhase, Updates};
     use cc_same_app::theme::{self, ThemeChoice};
     use cc_same_app::update::{self, Asset, Problem, Release};
     use cc_same_app::view::UniApp;
     use cc_same_core::config::{LastSync, PendingRestart};
+    use cc_same_core::logins::{Logins, Saved};
     use cc_same_core::report::{self, Overview};
     use cc_same_core::service::{Heartbeat, ServiceStatus};
     use cc_same_core::snapshot::{Manifest, SnapshotPart};
@@ -53,6 +54,20 @@ mod mac {
         Notes,
         /// Settings, with the answer to "Check now" on top.
         SettingsToast,
+        /// About to restart Claude to sign in to another account.
+        SignIn,
+    }
+
+    /// Where switching accounts stands in a scene.
+    #[derive(Clone, Copy)]
+    enum Switching {
+        Idle,
+        /// On the way to Grace.
+        ToGrace,
+        /// Restarting Claude on its sign-in page.
+        Restarting,
+        /// Claude waits for a sign-in to the third account.
+        Pending,
     }
 
     /// Where an update stands in a scene.
@@ -73,6 +88,7 @@ mod mac {
         overlay: Overlay,
         busy: Option<Busy>,
         update: Update,
+        switching: Switching,
         /// Tall enough to show the whole settings sheet.
         tall: bool,
         build: fn(&Sample) -> Option<Overview>,
@@ -86,6 +102,7 @@ mod mac {
             overlay: Overlay::None,
             busy: None,
             update: Update::None,
+            switching: Switching::Idle,
             tall: false,
             build,
         }
@@ -133,6 +150,24 @@ mod mac {
             Scene { update: Update::Available, overlay: Overlay::Notes, ..scene("update-notes-light", Light, in_sync) },
             Scene { overlay: Overlay::SettingsToast, ..scene("toast-settings-dark", Dark, in_sync) },
             Scene {
+                busy: Some(Busy::Switching),
+                switching: Switching::ToGrace,
+                ..scene("switch-to-grace-light", Light, in_sync)
+            },
+            Scene {
+                busy: Some(Busy::Switching),
+                switching: Switching::Restarting,
+                ..scene("switch-restarting-dark", Dark, in_sync)
+            },
+            Scene { switching: Switching::Pending, ..scene("switch-pending-light", Light, in_sync) },
+            Scene { overlay: Overlay::SignIn, ..scene("switch-sign-in-light", Light, in_sync) },
+            Scene { language: "zh-CN", overlay: Overlay::SignIn, ..scene("zh-CN-switch-sign-in-dark", Dark, in_sync) },
+            Scene {
+                language: "zh-CN",
+                switching: Switching::Pending,
+                ..scene("zh-CN-switch-pending-light", Light, in_sync)
+            },
+            Scene {
                 update: Update::Available,
                 overlay: Overlay::Settings,
                 tall: true,
@@ -169,7 +204,8 @@ mod mac {
             let overview = Some(report::overview(&ctx));
             let snapshots = cc_same_core::snapshot::list(&ctx);
             i18n::apply(&ctx.config().language);
-            let shot = Shot { busy: None, update: Update::None, overlay: Overlay::None, height: HEIGHT };
+            let (update, switching, overlay) = (Update::None, Switching::Idle, Overlay::None);
+            let shot = Shot { busy: None, update, switching, overlay, height: HEIGHT };
             capture(&mut cx, &out.join("live.png"), ctx, overview, snapshots, shot)?;
             return Ok(());
         }
@@ -182,7 +218,8 @@ mod mac {
             let overview = (scene.build)(&sample);
             let path = out.join(format!("{}.png", scene.name));
             let height = if scene.tall { 1560. } else { HEIGHT };
-            let shot = Shot { busy: scene.busy, update: scene.update, overlay: scene.overlay, height };
+            let (update, switching, overlay) = (scene.update, scene.switching, scene.overlay);
+            let shot = Shot { busy: scene.busy, update, switching, overlay, height };
             capture(&mut cx, &path, sample.ctx.clone(), overview, sample_snapshots(), shot)?;
         }
         Ok(())
@@ -192,6 +229,7 @@ mod mac {
     struct Shot {
         busy: Option<Busy>,
         update: Update,
+        switching: Switching,
         overlay: Overlay,
         height: f32,
     }
@@ -204,9 +242,21 @@ mod mac {
         snapshots: Vec<Manifest>,
         shot: Shot,
     ) -> anyhow::Result<()> {
-        let Shot { busy, update, overlay, height } = shot;
+        let Shot { busy, update, switching, overlay, height } = shot;
         let store = cx.update(|cx| Store::preview(ctx, overview, snapshots, busy, cx));
-        cx.update(|cx| store.update(cx, |store, _| store.updates = sample_updates(update)));
+        cx.update(|cx| {
+            store.update(cx, |store, _| {
+                store.updates = sample_updates(update);
+                match switching {
+                    Switching::Idle | Switching::Restarting => {}
+                    Switching::ToGrace => store.switching_to = Some(GRACE.0.into()),
+                    Switching::Pending => {
+                        let expected = None;
+                        store.signing_in = Some(SigningIn { previous: Some(ADA.0.into()), expected });
+                    }
+                }
+            })
+        });
         let mut view: Option<Entity<UniApp>> = None;
         let window = cx.open_window(size(px(WIDTH), px(height)), |window, cx| {
             let app = cx.new(|cx| UniApp::still(store, cx));
@@ -223,6 +273,7 @@ mod mac {
                     let snapshot = sample_snapshots().remove(0);
                     this.confirm_restore(&snapshot, window, cx);
                 }
+                Overlay::SignIn => this.confirm_sign_in(Some("grace@hopper.work".into()), window, cx),
                 Overlay::SettingsToast => {
                     this.open_settings(window, cx);
                     let message = i18n::tf("update.up_to_date", &[("version", &update::VERSION)]);
@@ -334,6 +385,16 @@ mod mac {
         fn overview(&self) -> Overview {
             let mut ov = report::overview(&self.ctx);
             let now = fsx::now_secs();
+            // Ada is in use; Grace was set aside two days ago; the third account never was.
+            ov.logins = Logins {
+                supported: true,
+                signed_in: Some(ADA.0.into()),
+                saved: vec![Saved {
+                    account: GRACE.0.into(),
+                    email: Some("grace@hopper.work".into()),
+                    set_aside_at: now - 2.0 * 86_400.0,
+                }],
+            };
             ov.service =
                 ServiceStatus { installed: true, running: Some(true), detail: "running".into(), ..Default::default() };
             ov.heartbeat = Some(Heartbeat {

@@ -4,7 +4,7 @@
 
 use crate::hero;
 use crate::i18n::{t, tf, tn};
-use crate::model::{self, Account, Busy, Mood};
+use crate::model::{self, Account, Busy, Login, Mood};
 use crate::settings;
 use crate::store::{Store, StoreEvent, UpdatePhase};
 use crate::theme;
@@ -16,6 +16,7 @@ use cc_same_core::snapshot::Manifest;
 use gpui_kit::base::{Easing, Transition, transition};
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -117,6 +118,133 @@ impl UniApp {
                 .cancel_text(t("dialog.cancel"))
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, cx| store.fix_links(cx));
+                    true
+                })
+        });
+    }
+
+    /// What sits at the end of an account's row: where Claude stands with it, or what one click
+    /// does. An account with several organizations offers it on its first row only.
+    fn account_action(&self, a: &Account, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (busy, switching_to, signing_in) = {
+            let store = self.store.read(cx);
+            (store.busy, store.switching_to.clone(), store.signing_in.is_some())
+        };
+        let theme = cx.theme();
+        let tag = |label: String, dot_color: Option<Hsla>| {
+            Tag::secondary()
+                .small()
+                .rounded_full()
+                .child(h_flex().gap_1p5().children(dot_color.map(dot)).child(label))
+                .into_any_element()
+        };
+        if a.open {
+            return Some(tag(t("account.open"), Some(theme.primary)));
+        }
+        if a.login == Login::SignedIn {
+            return Some(tag(t("account.signed_in"), None));
+        }
+        if !a.first_of_account {
+            return None;
+        }
+        if switching_to.as_deref() == Some(a.id.as_str()) {
+            let muted = theme.muted_foreground;
+            return Some(
+                h_flex()
+                    .gap_1p5()
+                    .text_size(rems(0.923))
+                    .text_color(muted)
+                    .child(Spinner::new().xsmall())
+                    .child(t("account.switching"))
+                    .into_any_element(),
+            );
+        }
+        let id = a.id.clone();
+        match a.login {
+            Login::Saved { stale } => Some(
+                Button::new(SharedString::from(format!("switch-{}", a.key)))
+                    .small()
+                    .outline()
+                    .label(t("account.switch"))
+                    .disabled(busy.is_some())
+                    .when(stale, |b| b.tooltip(t("account.stale")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.store.update(cx, |store, cx| store.switch_account(id, cx));
+                    }))
+                    .into_any_element(),
+            ),
+            // Waiting for a sign-in already: one restart is enough.
+            Login::Unknown if signing_in => None,
+            Login::Unknown => {
+                // Named in the dialog only by an email address, something people can type.
+                let name = a.has_email.then(|| a.name.clone());
+                Some(
+                    Button::new(SharedString::from(format!("sign-in-{}", a.key)))
+                        .small()
+                        .ghost()
+                        .label(t("account.sign_in"))
+                        .disabled(busy.is_some())
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.confirm_sign_in(name.clone(), window, cx)),
+                        )
+                        .into_any_element(),
+                )
+            }
+            Login::SignedIn | Login::Unsupported => None,
+        }
+    }
+
+    /// Explain, then restart Claude on its sign-in page. `expected` names the account the user
+    /// picked, when they did.
+    pub fn confirm_sign_in(&mut self, expected: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let current = {
+            let store = store.read(cx);
+            let signed_in = store.overview.as_ref().and_then(|o| o.logins.signed_in.clone());
+            signed_in.map(|id| store.account_name(&id))
+        };
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            let (title, body) = match &expected {
+                Some(name) => (tf("signin.title_as", &[("account", name)]), tf("signin.body_as", &[("account", name)])),
+                None => (t("signin.title"), t("signin.body")),
+            };
+            let description = v_flex()
+                .gap_2()
+                .child(body)
+                .when_some(current.as_ref(), |el, name| el.child(tf("signin.keeps", &[("account", name)])))
+                .child(div().pt_1().text_size(rems(0.846)).text_color(muted).child(t("signin.tip")));
+            let (store, expected) = (store.clone(), expected.clone());
+            alert
+                .title(title)
+                .description(description)
+                .confirm()
+                .ok_text(t("signin.ok"))
+                .cancel_text(t("dialog.cancel"))
+                .on_ok(move |_, _, cx| {
+                    let expected = expected.clone();
+                    store.update(cx, |store, cx| store.sign_in_another(expected, cx));
+                    true
+                })
+        });
+    }
+
+    /// Ask, then delete the sign-in kept for an account.
+    fn confirm_forget(&mut self, account: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (store, account) = (store.clone(), account.clone());
+            alert
+                .title(tf("forget.title", &[("account", &name)]))
+                .description(t("forget.body"))
+                .confirm()
+                .ok_text(t("forget.ok"))
+                .cancel_text(t("dialog.cancel"))
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    let account = account.clone();
+                    store.update(cx, |store, cx| store.forget_sign_in(account, cx));
                     true
                 })
         });
@@ -326,19 +454,33 @@ impl UniApp {
     }
 
     fn render_accounts(&self, accounts: &[Account], cx: &mut Context<Self>) -> AnyElement {
-        let loading = self.store.read(cx).overview.is_none();
-        let cowork = self.store.read(cx).config().syncs(Surface::Cowork);
+        let (loading, cowork, switching) = {
+            let store = self.store.read(cx);
+            let supported = store.overview.as_ref().is_some_and(|o| o.logins.supported);
+            (store.overview.is_none(), store.config().syncs(Surface::Cowork), supported)
+        };
+        let actions: Vec<Option<AnyElement>> = accounts.iter().map(|a| self.account_action(a, cx)).collect();
+        let add = switching.then(|| {
+            Button::new("add-account")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip(t("accounts.add"))
+                .disabled(self.store.read(cx).busy.is_some() || self.store.read(cx).signing_in.is_some())
+                .on_click(cx.listener(|this, _, window, cx| this.confirm_sign_in(None, window, cx)))
+        });
         let theme = cx.theme();
         let rows: Vec<AnyElement> = if loading {
             (0..3).map(|i| skeleton_row(i, cx)).collect()
         } else {
             accounts
                 .iter()
-                .map(|a| {
+                .zip(actions)
+                .map(|(a, action)| {
                     let key: SharedString = a.key.clone().into();
                     let hovered = self.hovered.as_ref() == Some(&key);
                     let hover_key = key.clone();
-                    h_flex()
+                    let row = h_flex()
                         .id(ElementId::Name(format!("account-{}", a.key).into()))
                         .gap_3()
                         .px_3()
@@ -366,28 +508,30 @@ impl UniApp {
                                         .child(a.detail()),
                                 ),
                         )
-                        .when(a.open, |el| {
-                            el.child(
-                                Tag::secondary()
-                                    .small()
-                                    .rounded_full()
-                                    .child(h_flex().gap_1p5().child(dot(theme.primary)).child(t("account.open"))),
-                            )
-                        })
-                        .into_any_element()
+                        .children(action);
+                    // A sign-in kept for switching can be let go of from the row's menu.
+                    if !(matches!(a.login, Login::Saved { .. }) && a.first_of_account) {
+                        return row.into_any_element();
+                    }
+                    let view = cx.entity().downgrade();
+                    let (id, name) = (a.id.clone(), a.name.clone());
+                    row.context_menu(move |menu, _, _| {
+                        let (view, id, name) = (view.clone(), id.clone(), name.clone());
+                        menu.item(PopupMenuItem::new(t("account.forget")).on_click(move |_, window, cx| {
+                            let (id, name) = (id.clone(), name.clone());
+                            let _ = view.update(cx, |this, cx| this.confirm_forget(id, name, window, cx));
+                        }))
+                    })
+                    .into_any_element()
                 })
                 .collect()
         };
         let empty = rows.is_empty();
         v_flex()
             .gap_2()
-            .child(
-                h_flex()
-                    .px_1()
-                    .justify_between()
-                    .child(section_label(t("accounts.title"), cx))
-                    .when(cowork, |el| el.child(section_label(t("accounts.both"), cx))),
-            )
+            .child(h_flex().px_1().h(px(20.)).justify_between().child(section_label(t("accounts.title"), cx)).child(
+                h_flex().gap_2().when(cowork, |el| el.child(section_label(t("accounts.both"), cx))).children(add),
+            ))
             .child(surface(cx).p_1().gap_px().children(rows).when(empty, |el| {
                 el.child(
                     div()
@@ -408,6 +552,7 @@ impl UniApp {
             (store.overview.clone(), store.busy, store.ctx.paths.log_file.clone())
         };
         let Some(ov) = overview else { return notices };
+        notices.extend(self.render_sign_in_notice(cx));
         if let Some(hint) = ov.restart_hint() {
             let open =
                 accounts.iter().find(|a| a.open).map(|a| a.name.clone()).unwrap_or_else(|| t("notice.open_account"));
@@ -468,6 +613,36 @@ impl UniApp {
         }
         notices.extend(self.render_update_notice(cx));
         notices
+    }
+
+    /// Claude is restarting on its sign-in page, or waiting there for the user to sign in.
+    fn render_sign_in_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (busy, switching_to, signing_in) = {
+            let store = self.store.read(cx);
+            (store.busy, store.switching_to.clone(), store.signing_in.clone())
+        };
+        if busy == Some(Busy::Switching) && switching_to.is_none() {
+            let spinner = Spinner::new().small().into_any_element();
+            return Some(notice("notice-sign-in", Tone::Info, t("signin.restarting"), vec![spinner], None, cx));
+        }
+        let pending = signing_in?;
+        let text = match &pending.expected {
+            Some(name) => tf("signin.pending_as", &[("account", name)]),
+            None => t("signin.pending"),
+        };
+        let back = pending.previous.map(|previous| {
+            Button::new("sign-in-back")
+                .small()
+                .outline()
+                .label(t("signin.back"))
+                .disabled(busy.is_some())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let previous = previous.clone();
+                    this.store.update(cx, |store, cx| store.switch_account(previous, cx));
+                }))
+                .into_any_element()
+        });
+        Some(notice("notice-sign-in", Tone::Info, text, back.into_iter().collect(), None, cx))
     }
 
     /// A new version: available, on its way, ready, or just installed.

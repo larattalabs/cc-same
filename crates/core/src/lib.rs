@@ -22,6 +22,7 @@ pub mod apply;
 pub mod config;
 pub mod desktop;
 pub mod fsx;
+pub mod logins;
 pub mod merge;
 pub mod model;
 pub mod notify;

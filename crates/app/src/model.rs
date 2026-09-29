@@ -85,6 +85,8 @@ pub enum Busy {
     Restoring,
     Fixing,
     Saving,
+    /// Claude is switching accounts: quitting, trading sign-ins, starting again.
+    Switching,
 }
 
 /// One session list Claude shows: an account in one organization.
@@ -106,6 +108,25 @@ pub struct Account {
     pub excluded: bool,
     /// The folder is a link; Claude cannot save here.
     pub broken: bool,
+    /// Whether Claude can switch to this account.
+    pub login: Login,
+    /// The account's first row: an account with several organizations has a row for each, and
+    /// only the first offers to switch.
+    pub first_of_account: bool,
+}
+
+/// Where an account stands for switching Claude to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Login {
+    /// Switching is not available on this system.
+    Unsupported,
+    /// Claude is signed in to it.
+    SignedIn,
+    /// Its sign-in is set aside: one click switches to it. `stale` once it has not been used for
+    /// about four weeks, when Claude may ask to sign in again.
+    Saved { stale: bool },
+    /// Signed in to before CC Same kept sign-ins: sign in to it once more to switch to it later.
+    Unknown,
 }
 
 impl Account {
@@ -165,20 +186,33 @@ pub enum Placement {
 pub fn accounts(ov: &Overview) -> Vec<Account> {
     let Some(code) = ov.surface(Surface::Code) else { return Vec::new() };
     let orgs = |acct: &str| code.partitions.iter().filter(|p| p.part.acct == acct).count();
+    let logins = &ov.logins;
+    let login = |acct: &str| match logins.saved(acct) {
+        _ if !logins.supported => Login::Unsupported,
+        _ if logins.signed_in.as_deref() == Some(acct) => Login::SignedIn,
+        Some(saved) => Login::Saved { stale: saved.stale() },
+        None => Login::Unknown,
+    };
     let mut rows: Vec<Account> = code
         .partitions
         .iter()
-        .map(|p: &PartitionView| Account {
+        .map(|p: &PartitionView| {
+            let email = p.email.clone().or_else(|| logins.saved(&p.part.acct).and_then(|s| s.email.clone()));
+            (p, email)
+        })
+        .map(|(p, email)| Account {
             key: format!("{}/{}", p.part.acct, p.part.org),
             id: p.part.acct.clone(),
-            name: p.email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(&p.part.acct))])),
-            has_email: p.email.is_some(),
+            name: email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(&p.part.acct))])),
+            has_email: email.is_some(),
             org: (orgs(&p.part.acct) > 1).then(|| tf("account.org", &[("id", &short(&p.part.org))])),
             sessions: p.sessions,
             missing: if p.excluded { 0 } else { p.missing },
             open: p.loaded,
             excluded: p.excluded,
             broken: p.error.is_some() || p.part.is_link,
+            login: login(&p.part.acct),
+            first_of_account: false,
         })
         .collect();
     // Named accounts first, then the ones we only know by id; excluded ones last.
@@ -186,6 +220,10 @@ pub fn accounts(ov: &Overview) -> Vec<Account> {
         let key = |r: &Account| (r.excluded, !r.has_email, r.name.to_lowercase(), r.key.clone());
         key(a).cmp(&key(b))
     });
+    let mut seen = std::collections::HashSet::new();
+    for row in &mut rows {
+        row.first_of_account = seen.insert(row.id.clone());
+    }
     rows
 }
 
@@ -288,6 +326,8 @@ mod tests {
             open: false,
             excluded: false,
             broken: false,
+            login: Login::Unknown,
+            first_of_account: true,
         }
     }
 

@@ -8,7 +8,7 @@ use gpui_kit::App;
 use std::rc::Rc;
 
 /// What a click in the tray asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Open,
     SyncNow,
@@ -16,7 +16,20 @@ pub enum Command {
     Settings,
     /// Install the new version, or look for one.
     Update,
+    /// Switch Claude to this account.
+    SwitchTo(String),
+    /// Restart Claude on its sign-in page, to sign in to another account.
+    SignInAnother,
     Quit,
+}
+
+/// An account in the tray's "Switch Account" menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrayAccount {
+    pub id: String,
+    pub name: String,
+    /// Claude is signed in to it.
+    pub current: bool,
 }
 
 pub type OnCommand = Rc<dyn Fn(Command, &mut App)>;
@@ -37,6 +50,12 @@ pub struct Status {
     /// "Check for Updates…", or "Update to 0.2.0…" once there is one.
     pub update: String,
     pub update_enabled: bool,
+    /// Switching accounts is available on this system.
+    pub can_switch: bool,
+    /// The account Claude is signed in to, then the ones it can switch to.
+    pub accounts: Vec<TrayAccount>,
+    pub switch_label: String,
+    pub sign_in_label: String,
     pub quit: String,
 }
 
@@ -50,6 +69,17 @@ impl Status {
             (_, Some(release)) => (tf("app.update_to", &[("version", &release.version)]), true),
             (_, None) => (t("app.check_updates"), true),
         };
+        let logins = store.overview.as_ref().map(|o| o.logins.clone()).unwrap_or_default();
+        let accounts = logins
+            .signed_in
+            .iter()
+            .map(|id| TrayAccount { id: id.clone(), name: store.account_name(id), current: true })
+            .chain(logins.saved.iter().map(|s| TrayAccount {
+                id: s.account.clone(),
+                name: store.account_name(&s.account),
+                current: false,
+            }))
+            .collect();
         Status {
             title: mood.title(),
             detail: mood.detail(),
@@ -63,6 +93,10 @@ impl Status {
             settings: t("app.settings"),
             update,
             update_enabled,
+            can_switch: logins.supported,
+            accounts,
+            switch_label: t("tray.switch_account"),
+            sign_in_label: t("tray.sign_in_another"),
             quit: t("app.quit"),
         }
     }
@@ -97,8 +131,9 @@ mod platform {
     use anyhow::Context as _;
     use gpui_kit::{App, AsyncApp, Task};
     use std::cell::RefCell;
+    use std::rc::Rc;
     use std::time::Duration;
-    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
     // macOS draws a template image in the menu bar's own color; Windows wants the colored icon.
@@ -126,8 +161,33 @@ mod platform {
         settings: MenuItem,
         update: MenuItem,
         quit: MenuItem,
+        /// "Switch Account", when switching is available.
+        accounts: Option<Submenu>,
+        /// What each item of the accounts menu does; they change with the accounts.
+        account_commands: Rc<RefCell<Vec<(MenuId, Command)>>>,
         last: RefCell<Status>,
         _events: Task<()>,
+    }
+
+    /// Fill the accounts menu: the account in use (checked), the ones to switch to, then signing
+    /// in to another.
+    fn fill_accounts(menu: &Submenu, status: &Status, commands: &RefCell<Vec<(MenuId, Command)>>) {
+        while menu.remove_at(0).is_some() {}
+        let mut found = Vec::new();
+        for account in &status.accounts {
+            let item = CheckMenuItem::new(&account.name, !account.current && status.can_sync, account.current, None);
+            let _ = menu.append(&item);
+            if !account.current {
+                found.push((item.id().clone(), Command::SwitchTo(account.id.clone())));
+            }
+        }
+        if !status.accounts.is_empty() {
+            let _ = menu.append(&PredefinedMenuItem::separator());
+        }
+        let sign_in = MenuItem::new(&status.sign_in_label, status.can_sync, None);
+        let _ = menu.append(&sign_in);
+        found.push((sign_in.id().clone(), Command::SignInAnother));
+        *commands.borrow_mut() = found;
     }
 
     impl Tray {
@@ -141,13 +201,18 @@ mod platform {
             let settings = MenuItem::new(&status.settings, true, None);
             let update = MenuItem::new(&status.update, status.update_enabled, None);
             let quit = MenuItem::new(&status.quit, true, None);
+            let account_commands = Rc::new(RefCell::new(Vec::new()));
+            let accounts = status.can_switch.then(|| {
+                let menu = Submenu::new(&status.switch_label, true);
+                fill_accounts(&menu, status, &account_commands);
+                menu
+            });
             let menu = Menu::new();
+            menu.append_items(&[&title, &detail, &PredefinedMenuItem::separator(), &sync, &background])?;
+            if let Some(accounts) = &accounts {
+                menu.append(accounts)?;
+            }
             menu.append_items(&[
-                &title,
-                &detail,
-                &PredefinedMenuItem::separator(),
-                &sync,
-                &background,
                 &PredefinedMenuItem::separator(),
                 &open,
                 &settings,
@@ -174,13 +239,16 @@ mod platform {
                 (quit.id().clone(), Command::Quit),
             ];
             let tray_id = icon.id().clone();
+            let dynamic = account_commands.clone();
             let events = cx.spawn(async move |cx: &mut AsyncApp| {
                 loop {
                     let mut asked = Vec::new();
                     while let Ok(event) = MenuEvent::receiver().try_recv() {
-                        if let Some((_, command)) = commands.iter().find(|(id, _)| *id == event.id) {
-                            asked.push(*command);
-                        }
+                        let known = commands.iter().find(|(id, _)| *id == event.id).map(|(_, c)| c.clone());
+                        let known = known.or_else(|| {
+                            dynamic.borrow().iter().find(|(id, _)| *id == event.id).map(|(_, c)| c.clone())
+                        });
+                        asked.extend(known);
                     }
                     while let Ok(event) = TrayIconEvent::receiver().try_recv() {
                         if let TrayIconEvent::Click {
@@ -212,6 +280,8 @@ mod platform {
                 settings,
                 update,
                 quit,
+                accounts,
+                account_commands,
                 last: RefCell::new(status.clone()),
                 _events: events,
             })
@@ -234,6 +304,14 @@ mod platform {
             self.update.set_text(&status.update);
             self.update.set_enabled(status.update_enabled);
             self.quit.set_text(&status.quit);
+            if let Some(accounts) = &self.accounts {
+                accounts.set_text(&status.switch_label);
+                let changed = (&last.accounts, &last.sign_in_label, last.can_sync)
+                    != (&status.accounts, &status.sign_in_label, status.can_sync);
+                if changed {
+                    fill_accounts(accounts, status, &self.account_commands);
+                }
+            }
             let _ = self.icon.set_tooltip(Some(status.tooltip()));
             if last.attention != status.attention
                 && let Ok(image) = icon(status.attention)
