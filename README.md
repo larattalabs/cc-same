@@ -65,7 +65,7 @@ cargo install --locked --git https://github.com/songkeys/cc-same cc-same
 cc-same install
 ```
 
-or grab `cc-same-<version>-<platform>` from Releases.
+or grab `cc-same-cli-<version>-<platform>` from Releases.
 
 The first time a sync copies sessions into the account Claude has open, quit and reopen Claude
 once: it only reads its session list at startup. After that, switching accounts needs nothing.

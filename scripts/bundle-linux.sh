@@ -28,6 +28,6 @@ install -Dm644 crates/app/resources/linux/cc-same.desktop "$root/share/applicati
 install -Dm644 crates/app/resources/linux/cc-same.png "$root/share/icons/hicolor/512x512/apps/cc-same.png"
 
 tar -C "$stage" -czf "$out/CC-Same-$version-linux-$arch.tar.gz" "cc-same-$version"
-tar -C target/release -czf "$out/cc-same-$version-linux-$arch.tar.gz" cc-same
+tar -C target/release -czf "$out/cc-same-cli-$version-linux-$arch.tar.gz" cc-same
 rm -rf "$stage"
 ls -1 "$out"

@@ -93,6 +93,7 @@ if [[ "${NOTARIZE:-0}" == "1" ]]; then
   xcrun stapler validate "$dmg"
 fi
 
-tar -C "$cli" -czf "$out/cc-same-$version-macos-$arch.tar.gz" cc-same
+cli_archive="$out/cc-same-cli-$version-macos-$arch.tar.gz"
+tar -C "$cli" -czf "$cli_archive" cc-same
 
-shasum -a 256 "$zip" "$dmg" "$out/cc-same-$version-macos-$arch.tar.gz"
+shasum -a 256 "$zip" "$dmg" "$cli_archive"
