@@ -11,13 +11,11 @@ fn main() {
     }
 }
 
-/// GPUI's Windows backend imports Common-Controls 6 entry points; without this manifest the
-/// loader refuses to start the program ("Entry Point Not Found").
+/// The icon and version details of the `.exe`. The application manifest (Common Controls 6,
+/// per-monitor DPI) comes from GPUI itself; a second one would clash at link time.
 fn embed_windows_resources() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join("windows");
-    let manifest = dir.join("cc-same.manifest.xml");
     let icon = dir.join("cc-same.ico");
-    println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", icon.display());
     let esc = |p: &Path| p.to_string_lossy().replace('\\', "\\\\");
     let version = env!("CARGO_PKG_VERSION");
@@ -31,8 +29,7 @@ fn embed_windows_resources() {
     );
     let icon_line = if icon.exists() { format!("1 ICON \"{}\"\n", esc(&icon)) } else { String::new() };
     let rc = format!(
-        r#"{icon_line}1 24 "{manifest}"
-
+        r#"{icon_line}
 1 VERSIONINFO
 FILEVERSION {numeric}
 PRODUCTVERSION {numeric}
@@ -60,7 +57,6 @@ BEGIN
     END
 END
 "#,
-        manifest = esc(&manifest),
     );
     let out = Path::new(&std::env::var("OUT_DIR").unwrap()).join("cc-same.rc");
     std::fs::write(&out, rc).expect("write the Windows resource script");

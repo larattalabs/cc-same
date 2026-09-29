@@ -37,6 +37,12 @@ jobs:
             libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev pkg-config
       - name: Install the pinned toolchain
         run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            . -> target
+            crates/app -> ../../target
       # With the Apple secrets set, macOS builds are signed with a Developer ID, notarized and
       # stapled; without them (forks), they are ad-hoc signed.
       - name: Import the signing identity (macOS)
