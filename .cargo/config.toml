@@ -1,0 +1,9 @@
+# The desktop app (crates/app) is a separate workspace; both share this target directory.
+[build]
+target-dir = "target"
+
+[alias]
+app = "run --manifest-path crates/app/Cargo.toml"
+app-build = "build --release --manifest-path crates/app/Cargo.toml"
+app-clippy = "clippy --manifest-path crates/app/Cargo.toml --all-targets"
+app-test = "test --manifest-path crates/app/Cargo.toml"

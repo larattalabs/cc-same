@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CC Same
+Comment=Keep Claude Desktop sessions identical across your accounts
+Exec=cc-same-app
+Icon=cc-same
+Categories=Utility;
+Terminal=false
+StartupWMClass=io.github.songkeys.cc-same

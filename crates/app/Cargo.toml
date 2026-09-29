@@ -1,0 +1,59 @@
+# The desktop app. It is a workspace of its own so that the command-line tool (the root
+# workspace) never has to download the GUI framework.
+[workspace]
+resolver = "2"
+
+[package]
+name = "cc-same-app"
+description = "Keep Claude Desktop's local sessions identical across all your accounts (desktop app)"
+# Same as the version in the root Cargo.toml (CI checks).
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/songkeys/cc-same"
+homepage = "https://github.com/songkeys/cc-same"
+# GPUI needs a recent toolchain; the repository pins it in rust-toolchain.toml.
+rust-version = "1.96"
+build = "build.rs"
+publish = false
+
+[[bin]]
+name = "cc-same-app"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+# Longbridge's GPUI Kit: components, theming and the GPUI release they are built against.
+gpui-kit = "=0.7.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The same translation runtime GPUI Kit uses, so its components follow the chosen language.
+rust-i18n = "4"
+serde_json = "1"
+auto-launch = "0.6"
+sys-locale = "0.3"
+cc-same-core = { path = "../core" }
+
+# The menu bar / notification area icon.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+tray-icon = { version = "0.24", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "tokio"] }
+
+[build-dependencies]
+embed-resource = "3.0"
+
+[dev-dependencies]
+gpui-kit = { version = "=0.7.0", features = ["test-support"] }
+tempfile = "3"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

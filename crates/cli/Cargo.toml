@@ -1,0 +1,26 @@
+[package]
+name = "cc-same"
+description = "Keep Claude Desktop's local sessions identical across all your accounts (command line)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+default-run = "cc-same"
+
+[[bin]]
+name = "cc-same"
+path = "src/main.rs"
+
+# The background agent. Identical to `cc-same watch`, but built without a console window
+# on Windows so nothing flashes at login.
+[[bin]]
+name = "cc-same-agent"
+path = "src/agent.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+cc-same-core.workspace = true

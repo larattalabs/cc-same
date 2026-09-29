@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#F4A97F"/>
+      <stop offset="0.55" stop-color="#DC7A4B"/>
+      <stop offset="1" stop-color="#B8532B"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.18" r="0.75">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="left"><circle cx="425" cy="520" r="172"/></clipPath>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#6E2A0E" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#glow)"/>
+  <rect x="101" y="101" width="822" height="822" rx="185" fill="none" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="2"/>
+  <g filter="url(#shadow)">
+    <circle cx="599" cy="520" r="172" fill="#FFFFFF" fill-opacity="0.42" clip-path="url(#left)"/>
+    <circle cx="425" cy="520" r="172" fill="none" stroke="#FFFFFF" stroke-width="54"/>
+    <circle cx="599" cy="520" r="172" fill="none" stroke="#FFFFFF" stroke-width="54"/>
+  </g>
+</svg>

@@ -1,0 +1,6 @@
+# GPUI (the app's UI framework) needs a recent compiler. The CLI and core also build on
+# Rust 1.85: `cargo +1.85 build -p cc-same`.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
