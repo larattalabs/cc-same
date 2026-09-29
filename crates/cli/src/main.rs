@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use cc_same_core::report::{self, Overview, Warning};
+use cc_same_core::retention::{self, Kept, Limit};
 use cc_same_core::service::{self, Heartbeat};
 use cc_same_core::watch::{self, WatchOptions};
 use cc_same_core::{apply, plan, short, snapshot, Config, Ctx, FakeDesktop, LogSink, Paths, State, Surface};
@@ -80,8 +81,17 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Show or set how long Claude Code keeps transcripts (cleanupPeriodDays)
-    Retention { days: Option<u32> },
+    /// Show how long Claude Code keeps transcripts; keep them, undo that, or set cleanupPeriodDays
+    Retention {
+        /// Set cleanupPeriodDays (terminal sessions and other data)
+        days: Option<u32>,
+        /// Keep the transcripts of Desktop sessions (only needed when Claude Code would delete them)
+        #[arg(long, conflicts_with_all = ["days", "undo"])]
+        keep: bool,
+        /// Put back the setting CC Same changed
+        #[arg(long, conflicts_with = "days")]
+        undo: bool,
+    },
     /// Show or change settings
     Config {
         /// `code` or `code,cowork` (local Cowork sessions, experimental)
@@ -173,7 +183,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("Fixed {} folder(s). Run `cc-same sync` to merge them.", fixed.len());
             Ok(())
         }
-        Cmd::Retention { days } => retention(&ctx, days),
+        Cmd::Retention { days, keep, undo } => retention(&ctx, days, keep, undo),
         Cmd::Config { surfaces, exclude, include, auto_join, notify } => {
             let mut cfg = ctx.config();
             let before = cfg.clone();
@@ -299,12 +309,12 @@ fn doctor(ctx: &Ctx) -> Result<()> {
             }
         }
     }
-    let retention = match ov.retention_days {
-        Some(d) => format!("{d} days"),
-        None => "30 days (default)".into(),
+    let retention = match ov.retention.desktop_days {
+        Some(d) => format!("deleted after {d} days"),
+        None => "kept at any age".into(),
     };
     println!();
-    println!("Claude Code keeps transcripts for: {retention}");
+    println!("Transcripts of Desktop sessions: {retention}");
     if let Some(ls) = &ov.last_sync {
         println!("Last sync: {} ({}), {} change(s), {} error(s)", report::ago(ls.at), ls.reason, ls.applied, ls.errors);
     }
@@ -348,11 +358,18 @@ fn warning_text(w: &Warning) -> String {
         Warning::SpansOrgs { orgs, .. } => format!(
             "Your accounts span {orgs} organizations, and synced sessions appear in all of them. To keep one separate: cc-same config --exclude <account-id>"
         ),
-        Warning::ShortRetention { days, path } => format!(
-            "Claude Code deletes transcripts after {} days (sessions started or continued in the Desktop app are exempt since v2.1.248). A session without its transcript cannot be reopened. Keep them longer with: cc-same retention 3650 (edits {})",
-            days.map(|d| d.to_string()).unwrap_or_else(|| "30".into()),
-            path.display()
-        ),
+        Warning::ShortRetention { days, limited_by, path } => {
+            let why = match limited_by {
+                Limit::DesktopSetting => format!("desktopSessionCleanupPeriodDays in {}", path.display()),
+                Limit::Organization => "your organization's managed settings".into(),
+                Limit::OlderClaudeCode => "a Claude Code before 2.1.248; updating Claude keeps them at any age".into(),
+            };
+            let fix = match limited_by {
+                Limit::Organization => "",
+                _ => " Keep them: cc-same retention --keep",
+            };
+            format!("Claude Code deletes the transcripts of Desktop sessions after {days} days ({why}), and a session opens empty without one.{fix}")
+        }
         Warning::MissingTranscripts { missing, total } => {
             format!("{missing} of {total} sessions no longer have a transcript on disk; they open empty or not at all")
         }
@@ -478,25 +495,53 @@ fn snapshots(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn retention(ctx: &Ctx, days: Option<u32>) -> Result<()> {
-    let current = report::cleanup_period_days(&ctx.paths);
-    match days {
-        None => {
-            match current {
-                Some(d) => {
-                    println!("Claude Code keeps transcripts for {d} days ({}).", ctx.paths.claude_settings.display())
-                }
-                None => println!("Claude Code keeps transcripts for 30 days (the default)."),
-            }
-            println!("Set it with: cc-same retention <days>   (e.g. 3650)");
+fn retention(ctx: &Ctx, days: Option<u32>, keep: bool, undo: bool) -> Result<()> {
+    if let Some(days) = days {
+        let backup = retention::set_cleanup_days(&ctx.paths, days)?;
+        println!("cleanupPeriodDays = {days} in {}", ctx.paths.claude_settings.display());
+        if let Some(b) = backup {
+            println!("Previous file saved as {}", b.display());
         }
-        Some(days) => {
-            let backup = report::set_cleanup_period_days(&ctx.paths, days)?;
-            println!("cleanupPeriodDays = {days} in {}", ctx.paths.claude_settings.display());
-            if let Some(b) = backup {
-                println!("Previous file saved as {}", b.display());
+        return Ok(());
+    }
+    if keep {
+        match retention::keep(&ctx.paths)? {
+            Kept::Already => println!("Claude Code already keeps the transcripts of Desktop sessions at any age."),
+            Kept::AnyAge => {
+                println!("Removed desktopSessionCleanupPeriodDays: Desktop sessions keep their transcripts at any age.")
+            }
+            Kept::TenYears => {
+                println!("cleanupPeriodDays = 3650. Updating Claude keeps Desktop transcripts at any age.")
             }
         }
+        println!("Undo with: cc-same retention --undo");
+        return Ok(());
+    }
+    if undo {
+        match retention::undo(&ctx.paths)? {
+            true => println!("Put back the setting CC Same changed in {}.", ctx.paths.claude_settings.display()),
+            false => println!("Nothing to undo."),
+        }
+        return Ok(());
+    }
+    let r = retention::read(&ctx.paths);
+    let version = r.claude_code.as_deref().map(|v| format!("Claude Code {v}")).unwrap_or_else(|| "Claude Code".into());
+    match (r.desktop_days, r.limited_by) {
+        (Some(d), Some(Limit::DesktopSetting)) => {
+            println!("Desktop sessions: transcripts deleted after {d} days (desktopSessionCleanupPeriodDays).")
+        }
+        (Some(d), Some(Limit::Organization)) => {
+            println!("Desktop sessions: transcripts deleted after {d} days (set by your organization).")
+        }
+        (Some(d), _) => println!("Desktop sessions: transcripts deleted after {d} days ({version} predates 2.1.248)."),
+        (None, _) => println!("Desktop sessions: transcripts kept at any age ({version})."),
+    }
+    println!("Terminal sessions and other data: deleted after {} days (cleanupPeriodDays).", r.cleanup_days);
+    if r.is_short() && r.limited_by != Some(Limit::Organization) {
+        println!("Keep them: cc-same retention --keep");
+    }
+    if r.undo.is_some() {
+        println!("Put back what CC Same changed: cc-same retention --undo");
     }
     Ok(())
 }

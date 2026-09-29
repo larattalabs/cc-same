@@ -27,6 +27,9 @@ pub struct Paths {
     pub projects: Vec<PathBuf>,
     /// Claude Code user settings (`cleanupPeriodDays` lives here).
     pub claude_settings: PathBuf,
+    /// Where Claude Code reads file-based managed settings (`managed-settings.json` and
+    /// `managed-settings.d/`), which an organization uses to override user settings.
+    pub managed_settings: PathBuf,
     /// Claude Code CLI state (its `oauthAccount` labels an account with an email).
     pub claude_json: PathBuf,
 }
@@ -64,6 +67,7 @@ impl Paths {
             log_file,
             projects,
             claude_settings: claude_home.join("settings.json"),
+            managed_settings: default_managed_settings(),
             claude_json: home().join(".claude.json"),
         }
     }
@@ -103,6 +107,22 @@ impl Paths {
 
     pub fn bin_dir(&self) -> PathBuf {
         self.state_dir.join("bin")
+    }
+
+    /// What CC Same last changed in Claude Code's settings, so it can be put back.
+    pub fn retention_undo_file(&self) -> PathBuf {
+        self.state_dir.join("retention-undo.json")
+    }
+}
+
+/// Claude Code's system directory for managed settings.
+fn default_managed_settings() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
     }
 }
 

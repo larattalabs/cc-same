@@ -148,11 +148,17 @@ Its preferences live next to the sync settings in `<state>/config.json`: `appear
 ## Transcripts
 
 CC Same copies session records, not transcripts: every account already reads the same
-`~/.claude/projects`. Claude Code deletes transcripts older than `cleanupPeriodDays` (30 by default,
-in `~/.claude/settings.json`); since v2.1.248, transcripts started or continued in Desktop or Cowork
-are exempt. A session whose transcript is gone still shows in the list but opens empty.
-`cc-same retention 3650`, or **Keep 10 years** in the app, raises the limit to ten years and
-backs up the settings file first. Don't use `0`: it does not mean "never".
+`~/.claude/projects`. Since Claude Code 2.1.248 the transcript of a session started or last
+continued in Claude Desktop or Cowork is kept at any age. `desktopSessionCleanupPeriodDays` can give
+those an age limit, and a managed `cleanupPeriodDays` applies to them too. `cleanupPeriodDays`
+(30 days by default) still covers terminal sessions and other data, and before 2.1.248 it covered
+Desktop sessions as well. A session whose transcript is gone still shows in the list but opens empty.
+
+CC Same warns only when Desktop sessions would lose their transcripts within a year.
+**Keep them** in the app, or `cc-same retention --keep`, removes the Desktop limit (on an older
+Claude Code it raises `cleanupPeriodDays` to ten years instead), backs up the settings file first,
+and can be undone with **Undo** or `cc-same retention --undo`. Don't set `cleanupPeriodDays` to
+`0`: Claude Code rejects it.
 
 ## What cannot be synced from the outside
 

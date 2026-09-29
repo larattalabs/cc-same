@@ -28,6 +28,7 @@ pub mod notify;
 pub mod paths;
 pub mod plan;
 pub mod report;
+pub mod retention;
 pub mod scan;
 pub mod service;
 pub mod snapshot;

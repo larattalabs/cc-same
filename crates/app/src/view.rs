@@ -10,6 +10,7 @@ use crate::store::{Store, StoreEvent};
 use crate::theme;
 use cc_same_core::Surface;
 use cc_same_core::report::Warning;
+use cc_same_core::retention::Limit;
 use cc_same_core::snapshot::Manifest;
 use gpui_kit::base::{Easing, Transition, transition};
 use gpui_kit::component::avatar::Avatar;
@@ -259,19 +260,27 @@ impl UniApp {
     }
 
     fn render_background(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (overview, busy) = {
+        let (overview, busy, switched_on_at) = {
             let store = self.store.read(cx);
-            (store.overview.clone(), store.busy)
+            (store.overview.clone(), store.busy, store.switched_on_at)
         };
         let theme = cx.theme();
         let st = overview.as_ref().map(|o| o.service.clone()).unwrap_or_default();
         let alive = overview.as_deref().is_some_and(model::agent_alive);
+        // Just switched on: the agent is starting and has not checked in yet.
+        let starting = switched_on_at.is_some_and(|t| t.elapsed() < Duration::from_secs(90));
         let (line, tone): (String, Hsla) = if st.installed && alive {
             let checked =
                 overview.as_ref().and_then(|o| o.heartbeat.as_ref()).map(|h| crate::i18n::ago(h.heartbeat_at));
             (tf("background.on", &[("ago", &checked.unwrap_or_else(|| t("time.just_now")))]), theme.muted_foreground)
+        } else if st.installed && starting {
+            (t("background.starting"), theme.muted_foreground)
         } else if st.installed {
-            (t("background.stalled"), theme.warning)
+            let mut line = t("background.stalled");
+            if cfg!(target_os = "macos") {
+                line = format!("{line} {}", t("background.stalled_mac"));
+            }
+            (line, theme.warning)
         } else if st.legacy {
             (t("background.legacy"), theme.warning)
         } else {
@@ -428,35 +437,32 @@ impl UniApp {
                 cx,
             ));
         }
-        let lost = ov.warnings.iter().find_map(|w| match w {
-            Warning::MissingTranscripts { missing, .. } => Some(*missing),
-            _ => None,
-        });
-        if let Some(days) = ov.warnings.iter().find_map(|w| match w {
-            Warning::ShortRetention { days, .. } => Some(*days),
+        // Only when Claude Code will actually delete the transcripts behind Desktop sessions.
+        if let Some((days, limited_by)) = ov.warnings.iter().find_map(|w| match w {
+            Warning::ShortRetention { days, limited_by, .. } => Some((*days, *limited_by)),
             _ => None,
         }) {
-            let days = days.map(|d| d.round() as usize).unwrap_or(30);
-            let mut text = tn("notice.retention", days, &[]);
-            if let Some(n) = lost.filter(|n| *n > 0) {
-                text = format!("{text} {}", tn("notice.retention_lost", n, &[]));
+            let mut text = tn("notice.retention", days.round() as usize, &[]);
+            match limited_by {
+                Limit::Organization => text = format!("{text} {}", t("notice.retention_org")),
+                Limit::OlderClaudeCode => text = format!("{text} {}", t("notice.retention_old")),
+                Limit::DesktopSetting => {}
             }
-            let store = self.store.clone();
-            notices.push(notice(
-                "notice-retention",
-                Tone::Warning,
-                text,
-                Some(
-                    Button::new("keep-transcripts")
-                        .small()
-                        .outline()
-                        .label(t("notice.keep_10_years"))
-                        .disabled(busy.is_some())
-                        .on_click(move |_, _, cx| store.update(cx, |store, cx| store.keep_transcripts(cx)))
-                        .into_any_element(),
-                ),
-                cx,
-            ));
+            let action = (limited_by != Limit::Organization).then(|| {
+                let store = self.store.clone();
+                let label = match limited_by {
+                    Limit::OlderClaudeCode => t("notice.keep_10_years"),
+                    _ => t("notice.keep_them"),
+                };
+                Button::new("keep-transcripts")
+                    .small()
+                    .outline()
+                    .label(label)
+                    .disabled(busy.is_some())
+                    .on_click(move |_, _, cx| store.update(cx, |store, cx| store.keep_transcripts(cx)))
+                    .into_any_element()
+            });
+            notices.push(notice("notice-retention", Tone::Warning, text, action, cx));
         }
         notices
     }

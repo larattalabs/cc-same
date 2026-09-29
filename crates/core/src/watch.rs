@@ -123,80 +123,90 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
     let mut last_fp: Option<u64> = None;
     let mut last_full: Option<Instant> = None;
     let mut last_running: Option<bool> = None;
-    let mut last_beat: Option<Instant> = None;
     let mut passes = 0u64;
-    while !stop.load(Ordering::Relaxed) {
-        passes += 1;
-        if let Err(e) = ctx.reload_config() {
-            ctx.debug(format!("config: {e}"));
-        }
-        let running = desktop::is_running(ctx);
-        let mut fp = fingerprint(ctx, running);
-        let quit_edge = last_running == Some(true) && !running;
-        if last_fp != Some(fp) || last_full.is_none_or(|t| t.elapsed() > full_every) {
-            if !quit_edge && last_fp.is_some() {
-                // Let Desktop finish a burst of writes before copying anything.
-                let deadline = Instant::now() + Duration::from_secs(6);
-                while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
-                    sleep_while(stop, Duration::from_millis(800));
-                    let next = fingerprint(ctx, running);
-                    if next == fp {
-                        break;
-                    }
-                    fp = next;
+    // The heartbeat has a thread of its own, from the start: a long first sync must not make a
+    // working agent look dead to the app.
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
+                Heartbeat {
+                    pid: std::process::id(),
+                    version: crate::VERSION.into(),
+                    exe: exe.clone(),
+                    started_at: started,
+                    heartbeat_at: fsx::now_secs(),
+                }
+                .write(&ctx.paths);
+                let next = Instant::now() + Duration::from_secs(15);
+                while Instant::now() < next && !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
-            let state = State::load(&ctx.paths);
-            let app = desktop::detect(ctx);
-            ensure_active_partition(ctx, &app, &state);
-            match apply::run_sync(ctx, "watch") {
-                Ok((_, out)) => {
-                    if out.applied_total() > 0 || !out.errors.is_empty() {
-                        let kinds: Vec<String> = out.applied.iter().map(|(k, n)| format!("{k:?} {n}")).collect();
-                        ctx.log(format!(
-                            "sync: {}{}",
-                            kinds.join(", "),
-                            if out.errors.is_empty() {
-                                String::new()
-                            } else {
-                                format!(", {} error(s)", out.errors.len())
-                            }
-                        ));
+        });
+        while !stop.load(Ordering::Relaxed) {
+            passes += 1;
+            if let Err(e) = ctx.reload_config() {
+                ctx.debug(format!("config: {e}"));
+            }
+            let running = desktop::is_running(ctx);
+            let mut fp = fingerprint(ctx, running);
+            let quit_edge = last_running == Some(true) && !running;
+            if last_fp != Some(fp) || last_full.is_none_or(|t| t.elapsed() > full_every) {
+                if !quit_edge && last_fp.is_some() {
+                    // Let Desktop finish a burst of writes before copying anything.
+                    let deadline = Instant::now() + Duration::from_secs(6);
+                    while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+                        sleep_while(stop, Duration::from_millis(800));
+                        let next = fingerprint(ctx, running);
+                        if next == fp {
+                            break;
+                        }
+                        fp = next;
                     }
-                    for (key, n) in &out.seeded_while_loaded {
-                        let mut st = State::load(&ctx.paths);
-                        if *n > 0 && !st.notified.contains(key) {
-                            notify(ctx, &format!("Copied {n} session(s) from your other accounts into the one Claude has open. Quit and reopen Claude to see them."));
-                            st.notified.push(key.clone());
-                            let _ = st.save(&ctx.paths);
+                }
+                let state = State::load(&ctx.paths);
+                let app = desktop::detect(ctx);
+                ensure_active_partition(ctx, &app, &state);
+                match apply::run_sync(ctx, "watch") {
+                    Ok((_, out)) => {
+                        if out.applied_total() > 0 || !out.errors.is_empty() {
+                            let kinds: Vec<String> = out.applied.iter().map(|(k, n)| format!("{k:?} {n}")).collect();
+                            ctx.log(format!(
+                                "sync: {}{}",
+                                kinds.join(", "),
+                                if out.errors.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(", {} error(s)", out.errors.len())
+                                }
+                            ));
+                        }
+                        for (key, n) in &out.seeded_while_loaded {
+                            let mut st = State::load(&ctx.paths);
+                            if *n > 0 && !st.notified.contains(key) {
+                                notify(ctx, &format!("Copied {n} session(s) from your other accounts into the one Claude has open. Quit and reopen Claude to see them."));
+                                st.notified.push(key.clone());
+                                let _ = st.save(&ctx.paths);
+                            }
                         }
                     }
+                    Err(e) => ctx.log(format!("watch: {e:#}")),
                 }
-                Err(e) => ctx.log(format!("watch: {e:#}")),
+                // Remember what this pass started from, not what it left: a change made while it
+                // ran must trigger the next pass. Our own writes do too, and that pass finds nothing.
+                last_fp = Some(fp);
+                last_full = Some(Instant::now());
             }
-            // Remember what this pass started from, not what it left: a change made while it
-            // ran must trigger the next pass. Our own writes do too, and that pass finds nothing.
-            last_fp = Some(fp);
-            last_full = Some(Instant::now());
-        }
-        if last_running.is_some_and(|r| r != running) {
-            ctx.log(if running { "Claude started" } else { "Claude quit" });
-        }
-        last_running = Some(running);
-        if last_beat.is_none_or(|t| t.elapsed() > Duration::from_secs(15)) {
-            Heartbeat {
-                pid: std::process::id(),
-                version: crate::VERSION.into(),
-                exe: exe.clone(),
-                started_at: started,
-                heartbeat_at: fsx::now_secs(),
+            if last_running.is_some_and(|r| r != running) {
+                ctx.log(if running { "Claude started" } else { "Claude quit" });
             }
-            .write(&ctx.paths);
-            last_beat = Some(Instant::now());
+            last_running = Some(running);
+            if opts.iterations.is_some_and(|max| passes >= max) {
+                break;
+            }
+            sleep_while(stop, opts.interval);
         }
-        if opts.iterations.is_some_and(|max| passes >= max) {
-            break;
-        }
-        sleep_while(stop, opts.interval);
-    }
+        done.store(true, Ordering::Relaxed);
+    });
 }

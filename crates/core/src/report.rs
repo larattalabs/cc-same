@@ -5,14 +5,11 @@ use crate::ctx::Ctx;
 use crate::desktop;
 use crate::fsx;
 use crate::model::*;
-use crate::paths::Paths;
 use crate::plan::build_plan;
 use crate::scan;
 use crate::service::{self, Heartbeat, ServiceStatus};
-use anyhow::{Context, Result};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -50,8 +47,9 @@ pub enum Warning {
     LeftoverFolders { surface: Surface, dirs: Vec<String> },
     /// Linked partitions belong to more than one organization.
     SpansOrgs { surface: Surface, orgs: usize },
-    /// Claude Code deletes old transcripts; an index entry without one cannot be reopened.
-    ShortRetention { days: Option<f64>, path: PathBuf },
+    /// Claude Code deletes the transcripts of Desktop sessions within a year; a session without
+    /// one opens empty.
+    ShortRetention { days: f64, limited_by: crate::retention::Limit, path: PathBuf },
     /// Sessions whose transcript is no longer on disk.
     MissingTranscripts { missing: usize, total: usize },
     /// Claude Desktop's data folder was not found.
@@ -77,7 +75,8 @@ pub struct Overview {
     pub surfaces: Vec<SurfaceView>,
     pub plan: PlanView,
     pub warnings: Vec<Warning>,
-    pub retention_days: Option<f64>,
+    /// How long Claude Code keeps the transcripts behind these sessions.
+    pub retention: crate::retention::Retention,
     pub service: ServiceStatus,
     pub heartbeat: Option<Heartbeat>,
     pub last_sync: Option<LastSync>,
@@ -213,9 +212,9 @@ pub fn overview(ctx: &Ctx) -> Overview {
         }
         surfaces.push(SurfaceView { surface, enabled, partitions: views, union: union.len() });
     }
-    let retention_days = cleanup_period_days(&ctx.paths);
-    if retention_days.is_none_or(|d| d < 365.0) {
-        warnings.push(Warning::ShortRetention { days: retention_days, path: ctx.paths.claude_settings.clone() });
+    let retention = crate::retention::read(&ctx.paths);
+    if let (true, Some(days), Some(limited_by)) = (retention.is_short(), retention.desktop_days, retention.limited_by) {
+        warnings.push(Warning::ShortRetention { days, limited_by, path: ctx.paths.claude_settings.clone() });
     }
     let (plan, _, _) = build_plan(ctx, Some(app.clone()), Some(&state));
     Overview {
@@ -224,7 +223,7 @@ pub fn overview(ctx: &Ctx) -> Overview {
         surfaces,
         plan: summarize(&plan),
         warnings,
-        retention_days,
+        retention,
         service: service::status(ctx),
         heartbeat: Heartbeat::read(&ctx.paths),
         last_sync: state.last_sync.clone(),
@@ -233,39 +232,6 @@ pub fn overview(ctx: &Ctx) -> Overview {
         config: cfg,
         app,
     }
-}
-
-/// `cleanupPeriodDays` from Claude Code's settings (`None`: not set, the default is 30).
-pub fn cleanup_period_days(paths: &Paths) -> Option<f64> {
-    let Ok(Value::Object(s)) = fsx::read_json(&paths.claude_settings, 16 * 1024 * 1024) else { return None };
-    s.get("cleanupPeriodDays").and_then(Value::as_f64)
-}
-
-/// Set `cleanupPeriodDays`, keeping every other setting. The previous file is kept next to it
-/// as `settings.json.cc-same-backup-<time>`. Returns that backup's path (if there was a file).
-pub fn set_cleanup_period_days(paths: &Paths, days: u32) -> Result<Option<PathBuf>> {
-    anyhow::ensure!(days >= 1, "cleanupPeriodDays must be at least 1 (0 is rejected by Claude Code)");
-    let path = &paths.claude_settings;
-    let mut settings = Map::new();
-    let mut backup = None;
-    if path.exists() {
-        match fsx::read_json(path, 16 * 1024 * 1024).with_context(|| format!("cannot read {}", path.display()))? {
-            Value::Object(m) => settings = m,
-            _ => anyhow::bail!("{} is not a JSON object; left untouched", path.display()),
-        }
-        let mut name = path.file_name().unwrap().to_os_string();
-        name.push(format!(".cc-same-backup-{}", crate::snapshot::stamp()));
-        let b = path.with_file_name(name);
-        fs::copy(path, &b)?;
-        backup = Some(b);
-    } else if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    settings.insert("cleanupPeriodDays".into(), Value::from(days));
-    let mut body = serde_json::to_vec_pretty(&Value::Object(settings))?;
-    body.push(b'\n');
-    fsx::atomic_write(path, &body, None, false)?;
-    Ok(backup)
 }
 
 /// Days since the Unix epoch seconds `t`, for "2 min ago" style labels.

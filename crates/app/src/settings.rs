@@ -8,6 +8,8 @@ use crate::theme::ThemeChoice;
 use crate::view::UniApp;
 use cc_same_core::Surface;
 use cc_same_core::config::Config;
+use cc_same_core::report::Warning;
+use cc_same_core::retention::Limit;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonGroup};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -30,7 +32,13 @@ fn body(store: &Entity<Store>, cx: &mut App) -> impl IntoElement {
     let cfg = this.config();
     let idle = this.busy.is_none();
     let running = this.overview.as_ref().is_some_and(|o| o.app.running);
-    let retention = this.overview.as_ref().and_then(|o| o.retention_days);
+    let retention = this.overview.as_ref().map(|o| o.retention.clone()).unwrap_or_default();
+    let missing = this.overview.as_ref().and_then(|o| {
+        o.warnings.iter().find_map(|w| match w {
+            Warning::MissingTranscripts { missing, .. } => Some(*missing),
+            _ => None,
+        })
+    });
     let baseline = this.overview.as_ref().and_then(|o| o.baseline.clone());
     let accounts = this.accounts();
     let current_theme = this.theme();
@@ -159,26 +167,51 @@ fn body(store: &Entity<Store>, cx: &mut App) -> impl IntoElement {
             .collect()
     };
 
-    let kept = retention.is_some_and(|d| d >= 3650.0);
-    let transcripts = vec![row(
-        tf("settings.kept_for", &[("period", &model::retention_label(retention))]),
-        Some(t(if kept { "settings.kept.long" } else { "settings.kept.short" })),
-        if kept {
-            Icon::new(IconName::CircleCheck).small().text_color(cx.theme().success).into_any_element()
-        } else {
-            Button::new("keep-10-years")
-                .small()
-                .outline()
-                .label(t("notice.keep_10_years"))
-                .disabled(!idle)
-                .on_click({
-                    let store = store.clone();
-                    move |_, _, cx| store.update(cx, |s, cx| s.keep_transcripts(cx))
-                })
-                .into_any_element()
-        },
-        cx,
-    )];
+    // How long the transcripts behind Desktop sessions stay, a way to keep them when they would
+    // go, and a way back from anything CC Same changed.
+    let (title, mut detail) = match retention.desktop_days {
+        None => (t("settings.kept_unlimited"), t("settings.kept.desktop")),
+        Some(days) => (
+            tf("settings.kept_for", &[("period", &model::retention_label(Some(days)))]),
+            t(if days >= 365.0 { "settings.kept.long" } else { "settings.kept.short" }),
+        ),
+    };
+    let control = if retention.undo.is_some() {
+        detail = format!("{detail} {}", t("settings.changed"));
+        Button::new("undo-retention")
+            .small()
+            .outline()
+            .label(t("settings.undo"))
+            .disabled(!idle)
+            .on_click({
+                let store = store.clone();
+                move |_, _, cx| store.update(cx, |s, cx| s.undo_retention(cx))
+            })
+            .into_any_element()
+    } else if retention.is_short() && retention.limited_by != Some(Limit::Organization) {
+        Button::new("keep-transcripts")
+            .small()
+            .outline()
+            .label(match retention.limited_by {
+                Some(Limit::OlderClaudeCode) => t("notice.keep_10_years"),
+                _ => t("notice.keep_them"),
+            })
+            .disabled(!idle)
+            .on_click({
+                let store = store.clone();
+                move |_, _, cx| store.update(cx, |s, cx| s.keep_transcripts(cx))
+            })
+            .into_any_element()
+    } else if retention.is_short() {
+        detail = format!("{detail} {}", t("notice.retention_org"));
+        div().into_any_element()
+    } else {
+        Icon::new(IconName::CircleCheck).small().text_color(cx.theme().success).into_any_element()
+    };
+    let mut transcripts = vec![row(title, Some(detail), control, cx)];
+    if let Some(n) = missing.filter(|n| *n > 0) {
+        transcripts.push(note(tn("settings.missing", n, &[]), cx));
+    }
 
     let mut restore: Vec<AnyElement> = Vec::new();
     if running && !snapshots.is_empty() {

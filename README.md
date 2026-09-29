@@ -81,7 +81,7 @@ cc-same uninstall      stop background syncing (every account keeps its full cop
 cc-same status         background sync and the last sync
 cc-same snapshots      list snapshots
 cc-same restore <id>   put every session list back as it was (quit Claude first)
-cc-same retention 3650 keep Claude Code transcripts for 10 years
+cc-same retention      how long Claude Code keeps transcripts (--keep, --undo)
 cc-same config         --exclude <account-id>, --surfaces code,cowork, --auto-join off, …
 ```
 

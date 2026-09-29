@@ -6,6 +6,7 @@ use crate::model::{self, Account, Busy, Mood};
 use crate::theme::ThemeChoice;
 use cc_same_core::config::Config;
 use cc_same_core::report::{self, Overview};
+use cc_same_core::retention::{self, Kept};
 use cc_same_core::snapshot::{self, Manifest};
 use cc_same_core::{ActionKind, Ctx, apply, desktop, fsx, service, watch};
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global};
@@ -31,6 +32,8 @@ pub struct Store {
     pub busy: Option<Busy>,
     /// The app opens (hidden) at login.
     pub open_at_login: bool,
+    /// When the background switch was last turned on: the agent gets a moment to start.
+    pub switched_on_at: Option<Instant>,
     refreshing: bool,
     fingerprint: u64,
     pending_since: Option<Instant>,
@@ -50,6 +53,7 @@ impl Store {
             snapshots: Vec::new(),
             busy: None,
             open_at_login: false,
+            switched_on_at: None,
             refreshing: false,
             fingerprint: 0,
             pending_since: None,
@@ -199,6 +203,7 @@ impl Store {
     }
 
     pub fn set_background(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.switched_on_at = on.then(Instant::now);
         self.run_task(Busy::Service, cx, move |ctx| {
             if on {
                 if !ctx.paths.config_file().exists() {
@@ -245,10 +250,21 @@ impl Store {
         });
     }
 
+    /// Keep the transcripts behind Desktop sessions, whichever setting it takes.
     pub fn keep_transcripts(&mut self, cx: &mut Context<Self>) {
         self.run_task(Busy::Saving, cx, |ctx| {
-            report::set_cleanup_period_days(&ctx.paths, 3650)?;
-            Ok(t("toast.kept"))
+            Ok(match retention::keep(&ctx.paths)? {
+                Kept::TenYears => t("toast.kept"),
+                Kept::AnyAge | Kept::Already => t("toast.kept_unlimited"),
+            })
+        });
+    }
+
+    /// Put back what CC Same changed in Claude Code's settings.
+    pub fn undo_retention(&mut self, cx: &mut Context<Self>) {
+        self.run_task(Busy::Saving, cx, |ctx| {
+            retention::undo(&ctx.paths)?;
+            Ok(t("toast.undone"))
         });
     }
 
