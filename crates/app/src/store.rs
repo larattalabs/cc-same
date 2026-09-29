@@ -13,7 +13,7 @@ use cc_same_core::{ActionKind, Ctx, apply, desktop, fsx, service, watch};
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -267,7 +267,19 @@ impl Store {
                     ctx.config().save(&ctx.paths)?;
                 }
                 let exe = std::env::current_exe()?;
-                service::install(ctx, &exe, AGENT_NAME)?;
+                if cfg!(target_os = "macos") {
+                    // The app's signature covers its executable only inside the app: macOS
+                    // refuses to run a copy, so the agent runs this very file, which has to stay.
+                    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+                    if update::temporary_place(&exe) {
+                        anyhow::bail!("{}", t("background.move_first"));
+                    }
+                    service::install_in_place(ctx, &exe)?;
+                    // The copy an earlier version ran is of no more use.
+                    let _ = std::fs::remove_file(ctx.paths.bin_dir().join(AGENT_NAME));
+                } else {
+                    service::install(ctx, &exe, AGENT_NAME)?;
+                }
             } else {
                 service::uninstall(ctx)?;
             }
@@ -325,11 +337,12 @@ impl Store {
         });
     }
 
-    /// The background agent is a copy of the app from when it was switched on. After an update it
-    /// still runs the old version, so it is replaced with this one (once, at the first reading).
+    /// Set the background agent up again when it no longer matches this app (once, at the first
+    /// reading): after an update it still runs the old version, and on macOS 0.1.0 and 0.1.1
+    /// registered a copy of the app that the system refuses to run.
     fn renew_agent(&mut self, cx: &mut Context<Self>) {
         let Some(overview) = self.overview.clone() else { return };
-        if std::mem::replace(&mut self.agent_checked, true) {
+        if std::mem::replace(&mut self.agent_checked, true) || !overview.service.installed || !update::self_managing() {
             return;
         }
         let behind = overview
@@ -337,7 +350,7 @@ impl Store {
             .as_ref()
             .and_then(|h| semver::Version::parse(&h.version).ok())
             .is_some_and(|v| v < update::current());
-        if overview.service.installed && behind {
+        if behind || agent_outdated(&overview.service.program, &self.ctx.paths.bin_dir()) {
             self.set_background(true, cx);
         }
     }
@@ -352,7 +365,7 @@ impl Store {
             loop {
                 let alive = this.update(cx, |this, cx| {
                     let due = this.updates.next_check.is_none_or(|at| Instant::now() >= at);
-                    if due && this.config().check_updates && update::checks_automatically() {
+                    if due && this.config().check_updates && update::self_managing() {
                         this.check_for_updates(false, cx);
                     }
                     this.install_when_idle(cx);
@@ -568,6 +581,15 @@ impl Store {
     }
 }
 
+/// Whether the registered agent has to be set up again from this app, on macOS: it is the copy
+/// in `bin` an earlier version made, or the app it ran from is gone (moved or deleted).
+fn agent_outdated(program: &[String], bin: &Path) -> bool {
+    let Some(registered) = program.first().map(Path::new) else { return false };
+    cfg!(target_os = "macos")
+        && (registered == bin.join(AGENT_NAME)
+            || (registered.to_string_lossy().contains(".app/Contents/MacOS/") && !registered.exists()))
+}
+
 /// Changes worth re-reading for: Claude's session folders and state, and ours.
 fn fingerprint(ctx: &Ctx) -> u64 {
     let mut h = DefaultHasher::new();
@@ -579,4 +601,26 @@ fn fingerprint(ctx: &Ctx) -> u64 {
         }
     }
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_agent_copied_by_an_earlier_version_or_left_behind_is_set_up_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let program = |path: &Path| vec![path.to_string_lossy().into_owned(), "watch".to_string()];
+        let expected = cfg!(target_os = "macos");
+        assert_eq!(agent_outdated(&program(&bin.join(AGENT_NAME)), &bin), expected);
+        assert_eq!(agent_outdated(&program(&dir.path().join("Gone.app/Contents/MacOS/CC Same")), &bin), expected);
+        // The app it runs from is still there, or it is the command-line tool's own copy.
+        let app = dir.path().join("CC Same.app/Contents/MacOS/CC Same");
+        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+        std::fs::write(&app, "").unwrap();
+        assert!(!agent_outdated(&program(&app), &bin));
+        assert!(!agent_outdated(&program(&bin.join("cc-same")), &bin));
+        assert!(!agent_outdated(&[], &bin));
+    }
 }

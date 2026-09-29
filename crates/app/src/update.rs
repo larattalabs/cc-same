@@ -63,7 +63,8 @@ pub enum Problem {
     NoBuild,
     /// This copy is not an installed app: a development build, or a program outside its bundle.
     NotInstalled,
-    /// macOS runs this copy from a temporary, read-only place until it is moved to Applications.
+    /// This copy runs from a disk image, or from the temporary read-only place macOS uses until
+    /// the app is moved to Applications.
     Translocated,
     /// This copy's folder cannot be written to.
     ReadOnly,
@@ -118,10 +119,30 @@ pub fn current() -> Version {
     Version::parse(VERSION).unwrap_or_else(|_| Version::new(0, 0, 0))
 }
 
-/// Whether the app looks for updates by itself: not in a development build, which does not
-/// update itself either (set `CC_SAME_DEV_UPDATE=1` to try both).
-pub fn checks_automatically() -> bool {
+/// Whether this copy looks after itself: looks for updates, installs them, and keeps the
+/// background agent in step with it. A development build does not (set `CC_SAME_DEV_UPDATE=1`
+/// to try).
+pub fn self_managing() -> bool {
     !cfg!(debug_assertions) || std::env::var_os("CC_SAME_DEV_UPDATE").is_some()
+}
+
+/// Whether `path` is somewhere an app cannot stay: a disk image, or the temporary read-only
+/// place macOS runs a downloaded app from until it is moved (App Translocation).
+#[cfg(target_os = "macos")]
+pub fn temporary_place(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    if path.components().any(|c| c.as_os_str() == "AppTranslocation") {
+        return true;
+    }
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let mut volume: libc::statfs = unsafe { std::mem::zeroed() };
+    let found = unsafe { libc::statfs(c_path.as_ptr(), &mut volume) } == 0;
+    found && volume.f_flags & libc::MNT_RDONLY as u32 != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn temporary_place(_path: &Path) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------- asking GitHub
@@ -301,7 +322,7 @@ fn check_version(program: &Path, version: &Version) -> anyhow::Result<()> {
 
 /// What an update replaces: the app bundle on macOS, the program elsewhere.
 pub fn target() -> Outcome<PathBuf> {
-    if !checks_automatically() {
+    if !self_managing() {
         let error = anyhow!("a development build does not update itself (set CC_SAME_DEV_UPDATE=1)");
         return Err(Failure::new(Problem::NotInstalled, error));
     }
@@ -465,8 +486,8 @@ mod platform {
             let error = anyhow!("{} is not inside an app bundle", exe.display());
             return Err(Failure::new(Problem::NotInstalled, error));
         };
-        if bundle.components().any(|c| c.as_os_str() == "AppTranslocation") {
-            let error = anyhow!("macOS runs this copy from {}", bundle.display());
+        if temporary_place(&bundle) {
+            let error = anyhow!("this copy runs from {}, which it cannot replace", bundle.display());
             return Err(Failure::new(Problem::Translocated, error));
         }
         Ok(bundle)
@@ -493,7 +514,7 @@ mod platform {
                 }
             }
             // A development build trying updates takes another local build as it is.
-            (None, None) if checks_automatically() && cfg!(debug_assertions) => {}
+            (None, None) if self_managing() && cfg!(debug_assertions) => {}
             (None, _) => run(Command::new("/usr/sbin/spctl").args(["--assess", "--type", "execute"]).arg(app))?,
         }
         Ok(())
@@ -940,6 +961,15 @@ mod tests {
         let asset = release.asset.expect("an archive for this system");
         assert!(asset.sha256.is_some_and(|d| d.len() == 64), "GitHub lists a SHA-256 digest");
         assert!(check().is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_disk_image_or_a_translocated_app_is_a_temporary_place() {
+        let translocated = "/private/var/folders/x/T/AppTranslocation/0A1B/d/CC Same.app/Contents/MacOS/CC Same";
+        assert!(temporary_place(Path::new(translocated)));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!temporary_place(dir.path()));
     }
 
     #[test]

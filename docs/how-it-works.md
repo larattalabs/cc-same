@@ -118,7 +118,11 @@ For every session:
 
 `cc-same install` (or the app's switch) copies the binary to `<state>/bin` and registers it to run
 `watch` at login: a LaunchAgent on macOS, a `Run` value on Windows (a windowless build, so nothing
-flashes), and a systemd user service on Linux, with an XDG autostart fallback. The agent:
+flashes), and a systemd user service on Linux, with an XDG autostart fallback. The Mac app is the
+exception: it registers its own executable where it is, because the app's signature covers that
+file only inside `CC Same.app`, and macOS refuses to run a copy of it anywhere else (0.1.0 and
+0.1.1 made that copy; the app sets such an agent up again when it opens). For the same reason it
+won't set the agent up while it runs from a disk image. The agent:
 
 - polls a cheap fingerprint of the index folders and Desktop's `config.json` every 2 seconds;
 - waits up to 6 seconds for a burst of writes to settle, then syncs;
@@ -169,8 +173,8 @@ then once a day it asks GitHub's API for the latest release. When there is a new
 
 With *Install updates automatically* on (the default), step 3 waits until the window is closed or
 the app quits; otherwise **Update** does it all at once. A development build does not update
-itself. The background agent is a copy of the app from when it was switched on, so after an
-update the app replaces it with the new version the next time it starts. *What's new* shows the
+itself. The background agent keeps running the version it started with, so after an update the
+app sets it up again the next time it starts. *What's new* shows the
 release notes, from [CHANGELOG.md](../CHANGELOG.md).
 
 ## Transcripts

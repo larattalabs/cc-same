@@ -457,6 +457,17 @@ _version: 2
   es: "Si sigue así, permítela en Ajustes del Sistema › General › Ítems de inicio y extensiones."
   pt-BR: "Se continuar assim, permita em Ajustes do Sistema › Geral › Itens de Início e Extensões."
   ru: "Если так и останется, разрешите фоновую работу: Системные настройки › Основные › Объекты входа и расширения."
+"background.move_first":
+  en: "Move CC Same to the Applications folder first, then turn this on."
+  zh-CN: "请先把 CC Same 移到“应用程序”文件夹，再打开这个开关。"
+  zh-TW: "請先將 CC Same 移到「應用程式」檔案夾，再開啟這個開關。"
+  ja: "先に CC Same を「アプリケーション」フォルダに移動してから、オンにしてください。"
+  ko: "먼저 CC Same를 응용 프로그램 폴더로 옮긴 다음 켜세요."
+  fr: "Placez d’abord CC Same dans le dossier Applications, puis activez cette option."
+  de: "Bewege CC Same zuerst in den Ordner „Programme“ und schalte es dann ein."
+  es: "Primero mueve CC Same a la carpeta Aplicaciones y luego actívalo."
+  pt-BR: "Primeiro mova o CC Same para a pasta Aplicativos e depois ative esta opção."
+  ru: "Сначала переместите CC Same в папку «Программы», затем включите эту функцию."
 "background.legacy":
   en: "An older version is running. Turn on to update it."
   zh-CN: "正在运行旧版本，打开开关即可更新。"

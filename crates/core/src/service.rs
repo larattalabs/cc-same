@@ -4,9 +4,12 @@
 //! * Windows: a `Run` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 //! * Linux: a systemd user service, or an XDG autostart entry without systemd.
 //!
-//! The agent is a copy of the installing binary in `<state>/bin`, started with `watch`, so it
-//! keeps working when the original is moved or updated. It writes a heartbeat file that
-//! front-ends read to tell whether it is alive.
+//! The agent is the installing binary started with `watch`. The command-line tool, and the app on
+//! Windows and Linux, run a copy of themselves in `<state>/bin`, so it keeps working when the
+//! original is moved or updated. The Mac app runs its own executable in place
+//! ([`install_in_place`]): the app's signature covers that file only inside the app, and macOS
+//! refuses to run a copy of it anywhere else. The agent writes a heartbeat file that front-ends
+//! read to tell whether it is alive.
 
 use crate::ctx::Ctx;
 use crate::fsx;
@@ -90,7 +93,20 @@ pub fn install(ctx: &Ctx, exe: &Path, name: &str) -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&installed, fs::Permissions::from_mode(0o755))?;
     }
-    let mut program = vec![installed.to_string_lossy().into_owned()];
+    platform::register(ctx, &agent_program(ctx, &installed))?;
+    Ok(installed)
+}
+
+/// Register `exe` itself, where it is, to run `watch` at login, starting it now. For a program
+/// that only runs where it is: the Mac app's executable, signed as part of its bundle.
+pub fn install_in_place(ctx: &Ctx, exe: &Path) -> Result<()> {
+    stop_heartbeat_agent(ctx);
+    platform::register(ctx, &agent_program(ctx, exe))
+}
+
+/// The agent's command line: `exe`, the locations when they are not the default ones, `watch`.
+fn agent_program(ctx: &Ctx, exe: &Path) -> Vec<String> {
+    let mut program = vec![exe.to_string_lossy().into_owned()];
     if ctx.paths.user_data != crate::paths::default_user_data() {
         program.push("--user-data".into());
         program.push(ctx.paths.user_data.to_string_lossy().into_owned());
@@ -100,8 +116,7 @@ pub fn install(ctx: &Ctx, exe: &Path, name: &str) -> Result<PathBuf> {
         program.push(ctx.paths.state_dir.to_string_lossy().into_owned());
     }
     program.push("watch".into());
-    platform::register(ctx, &program)?;
-    Ok(installed)
+    program
 }
 
 /// Rename `from` over `to`. On Windows a virus scanner, or a program that is just exiting, can
@@ -555,6 +570,20 @@ mod tests {
         assert!(marked());
         super::clear_download_mark(&file);
         assert!(!marked());
+    }
+
+    #[test]
+    fn the_agent_runs_watch_with_the_locations_that_differ() {
+        use crate::{Config, Ctx, FakeDesktop, LogSink, Paths};
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("claude"), dir.path().join("state"));
+        let ctx = Ctx::new(paths.clone(), Config::default(), FakeDesktop::default(), LogSink::Silent);
+        let program = super::agent_program(&ctx, Path::new("/Applications/CC Same.app/Contents/MacOS/CC Same"));
+        assert_eq!(program.first().map(String::as_str), Some("/Applications/CC Same.app/Contents/MacOS/CC Same"));
+        assert_eq!(program.last().map(String::as_str), Some("watch"));
+        assert!(program.windows(2).any(|w| w[0] == "--state-dir" && Path::new(&w[1]) == paths.state_dir));
+        assert!(program.windows(2).any(|w| w[0] == "--user-data" && Path::new(&w[1]) == paths.user_data));
     }
 
     #[cfg(target_os = "macos")]
