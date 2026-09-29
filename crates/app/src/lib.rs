@@ -98,11 +98,16 @@ pub fn run() {
 
 /// Bring the window forward, opening it if it was closed.
 pub fn show_window(cx: &mut App) {
-    for handle in cx.windows() {
-        if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
-            cx.activate(true);
-            return;
+    if let Some(handle) = cx.windows().first().copied() {
+        // A window that is handling the click that got here (a menu command) cannot be updated
+        // until it is done; it is still there, so bring it forward right after.
+        if handle.update(cx, |_, window, _| window.activate_window()).is_err() {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, _| window.activate_window());
+            });
         }
+        cx.activate(true);
+        return;
     }
     let store = Store::global(cx);
     let options = window_options(cx);

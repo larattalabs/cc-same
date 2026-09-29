@@ -3,6 +3,15 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Fixed
+
+- **Check for Updates… in the app menu opened a second window.** It now brings the one window
+  forward.
+- **Messages shown while Settings is open** were pushed off the left edge of the window. They now
+  appear centered at the bottom, over the settings.
+
 ## 0.1.2 - 2026-09-29
 
 ### Fixed

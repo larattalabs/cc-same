@@ -51,6 +51,8 @@ mod mac {
         Settings,
         ConfirmRestore,
         Notes,
+        /// Settings, with the answer to "Check now" on top.
+        SettingsToast,
     }
 
     /// Where an update stands in a scene.
@@ -129,6 +131,7 @@ mod mac {
             Scene { update: Update::Failed, ..scene("update-failed-light", Light, in_sync) },
             Scene { update: Update::Updated, ..scene("update-done-dark", Dark, in_sync) },
             Scene { update: Update::Available, overlay: Overlay::Notes, ..scene("update-notes-light", Light, in_sync) },
+            Scene { overlay: Overlay::SettingsToast, ..scene("toast-settings-dark", Dark, in_sync) },
             Scene {
                 update: Update::Available,
                 overlay: Overlay::Settings,
@@ -219,6 +222,11 @@ mod mac {
                 Overlay::ConfirmRestore => {
                     let snapshot = sample_snapshots().remove(0);
                     this.confirm_restore(&snapshot, window, cx);
+                }
+                Overlay::SettingsToast => {
+                    this.open_settings(window, cx);
+                    let message = i18n::tf("update.up_to_date", &[("version", &update::VERSION)]);
+                    cc_same_app::view::show_outcome(&Ok(message), window, cx);
                 }
                 Overlay::Notes => {
                     let release = sample_release();

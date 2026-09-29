@@ -25,10 +25,10 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Theme, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
     FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, actions, div, ease_out_quint,
     linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rems,
@@ -57,11 +57,7 @@ impl UniApp {
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |_, _, event: &StoreEvent, window, cx| {
                 let StoreEvent::Done(result) = event;
-                match result {
-                    Ok(message) if message.is_empty() => {}
-                    Ok(message) => window.push_notification(Notification::success(message.clone()), cx),
-                    Err(error) => window.push_notification(Notification::error(error.clone()).autohide(false), cx),
-                }
+                show_outcome(result, window, cx);
             }),
         ];
         let focus = cx.focus_handle();
@@ -610,6 +606,29 @@ impl Render for UniApp {
                 ),
             )
     }
+}
+
+/// The outcome of a task, as a notification: an error stays until it is dismissed.
+pub fn show_outcome(result: &Result<String, String>, window: &mut Window, cx: &mut App) {
+    let note = match result {
+        Ok(message) if message.is_empty() => return,
+        Ok(message) => Notification::success(message.clone()),
+        Err(error) => Notification::error(error.clone()).autohide(false),
+    };
+    let note = centered(note, window, cx);
+    window.push_notification(note, cx);
+}
+
+/// Notifications sit at the bottom center of the window. With a sheet open, GPUI Kit keeps them to
+/// the part of the window the sheet leaves free, a sliver in a window this narrow, so they are
+/// placed from the window's left edge instead, still centered, over the sheet.
+fn centered(note: Notification, window: &mut Window, cx: &mut App) -> Notification {
+    if !window.has_active_sheet(cx) {
+        return note;
+    }
+    let free = window.viewport_size().width - cx.theme().notification.width;
+    Theme::global_mut(cx).notification.margins.left = (free / 2.).max(px(0.));
+    note.placement(Anchor::BottomLeft)
 }
 
 /// Which headline is showing, ignoring its numbers.
