@@ -22,6 +22,10 @@ pub const LABEL: &str = "io.github.songkeys.cc-same";
 /// Agents from before the rename (the Python prototype, then "Uni Claude"), replaced on install.
 pub const LEGACY_LABELS: &[&str] = &["local.uni-claude", "io.github.songkeys.uni-claude"];
 pub const DISPLAY_NAME: &str = "CC Same";
+/// The app's bundle identifier. System Settings lists a background item under the app it names;
+/// without one, a standalone agent is listed under the name on its signing certificate.
+#[cfg(target_os = "macos")]
+const APP_BUNDLE_ID: &str = "io.github.songkeys.cc-same";
 /// The display name before the rename (the Windows `Run` value).
 #[cfg(windows)]
 const LEGACY_DISPLAY_NAME: &str = "Uni Claude";
@@ -223,15 +227,11 @@ mod platform {
         let _ = run_quiet(Command::new("/bin/launchctl").args(["bootout", &format!("gui/{}/{label}", uid())]));
     }
 
-    pub fn register(ctx: &Ctx, program: &[String]) -> Result<()> {
-        for legacy in LEGACY_LABELS {
-            bootout(legacy);
-            let _ = fs::remove_file(plist_path(legacy));
-        }
-        bootout(LABEL);
-        let log = xml(&ctx.paths.log_file.with_extension("agent.log").to_string_lossy());
+    /// The LaunchAgent: `program` at login and whenever it stops, logging to `log`.
+    pub(super) fn plist(program: &[String], log: &Path) -> String {
+        let log = xml(&log.to_string_lossy());
         let args: String = program.iter().map(|a| format!("\n        <string>{}</string>", xml(a))).collect();
-        let plist = format!(
+        format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -257,13 +257,25 @@ mod platform {
     <string>{log}</string>
     <key>StandardErrorPath</key>
     <string>{log}</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>{APP_BUNDLE_ID}</string>
+    </array>
 </dict>
 </plist>
 "#
-        );
+        )
+    }
+
+    pub fn register(ctx: &Ctx, program: &[String]) -> Result<()> {
+        for legacy in LEGACY_LABELS {
+            bootout(legacy);
+            let _ = fs::remove_file(plist_path(legacy));
+        }
+        bootout(LABEL);
         let path = plist_path(LABEL);
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, plist)?;
+        fs::write(&path, plist(program, &ctx.paths.log_file.with_extension("agent.log")))?;
         let out = run_quiet(Command::new("/bin/launchctl").args(["bootstrap", &format!("gui/{}", uid())]).arg(&path))?;
         if !out.status.success() {
             bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -279,6 +291,18 @@ mod platform {
         Ok(())
     }
 
+    /// The `ProgramArguments` of a plist written by `register`.
+    pub(super) fn program_arguments(plist: &str) -> Vec<String> {
+        let Some(rest) = plist.split("<key>ProgramArguments</key>").nth(1) else { return Vec::new() };
+        let array = rest.split("</array>").next().unwrap_or_default();
+        array
+            .split("<string>")
+            .skip(1)
+            .filter_map(|s| s.split("</string>").next())
+            .map(|s| s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+            .collect()
+    }
+
     pub fn status(_ctx: &Ctx) -> ServiceStatus {
         let legacy = LEGACY_LABELS.iter().any(|l| plist_path(l).exists());
         let path = plist_path(LABEL);
@@ -290,12 +314,7 @@ mod platform {
                 ..Default::default()
             };
         }
-        let program = fs::read_to_string(&path)
-            .ok()
-            .map(|p| {
-                p.split("<string>").skip(1).filter_map(|s| s.split("</string>").next()).map(str::to_string).collect()
-            })
-            .unwrap_or_default();
+        let program = fs::read_to_string(&path).ok().map(|p| program_arguments(&p)).unwrap_or_default();
         let out = run_quiet(Command::new("/bin/launchctl").args(["print", &format!("gui/{}/{LABEL}", uid())]));
         let running = out.ok().filter(|o| o.status.success()).map(|o| {
             let text = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -536,5 +555,16 @@ mod tests {
         assert!(marked());
         super::clear_download_mark(&file);
         assert!(!marked());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launch_agent_names_the_app_and_reads_back() {
+        let program: Vec<String> =
+            ["/Users/a & b/cc-same-agent", "--state-dir", "/tmp/<state>", "watch"].map(String::from).to_vec();
+        let plist = super::platform::plist(&program, std::path::Path::new("/tmp/agent.log"));
+        assert!(plist.contains("<key>AssociatedBundleIdentifiers</key>"));
+        assert!(plist.contains("<string>io.github.songkeys.cc-same</string>"));
+        assert_eq!(super::platform::program_arguments(&plist), program);
     }
 }
