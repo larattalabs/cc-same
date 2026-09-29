@@ -328,7 +328,7 @@ mod platform {
     use super::{Command, OnCommand, Status, decode};
     use gpui_kit::{App, AsyncApp, Task};
     use ksni::blocking::{Handle, TrayMethods as _};
-    use ksni::menu::{CheckmarkItem, StandardItem};
+    use ksni::menu::{CheckmarkItem, StandardItem, SubMenu};
     use std::sync::mpsc::{self, Sender};
     use std::time::Duration;
 
@@ -341,6 +341,40 @@ mod platform {
     impl Item {
         fn send(&self, command: Command) {
             let _ = self.commands.send(command);
+        }
+
+        /// "Switch Account": the account in use (checked), the ones to switch to, then signing in
+        /// to another.
+        fn accounts_menu(&self) -> SubMenu<Self> {
+            let s = &self.status;
+            let mut submenu: Vec<ksni::MenuItem<Self>> = s
+                .accounts
+                .iter()
+                .map(|account| {
+                    let id = account.id.clone();
+                    CheckmarkItem {
+                        label: account.name.clone(),
+                        enabled: !account.current && s.can_sync,
+                        checked: account.current,
+                        activate: Box::new(move |this: &mut Self| this.send(Command::SwitchTo(id.clone()))),
+                        ..Default::default()
+                    }
+                    .into()
+                })
+                .collect();
+            if !s.accounts.is_empty() {
+                submenu.push(ksni::MenuItem::Separator);
+            }
+            submenu.push(
+                StandardItem {
+                    label: s.sign_in_label.clone(),
+                    enabled: s.can_sync,
+                    activate: Box::new(|this: &mut Self| this.send(Command::SignInAnother)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            SubMenu { label: s.switch_label.clone(), submenu, ..Default::default() }
         }
     }
 
@@ -371,7 +405,8 @@ mod platform {
 
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             let s = &self.status;
-            vec![
+            let accounts: Option<ksni::MenuItem<Self>> = s.can_switch.then(|| self.accounts_menu().into());
+            let mut items: Vec<ksni::MenuItem<Self>> = vec![
                 StandardItem { label: s.title.clone(), enabled: false, ..Default::default() }.into(),
                 StandardItem { label: s.detail.clone(), enabled: false, ..Default::default() }.into(),
                 ksni::MenuItem::Separator,
@@ -417,7 +452,12 @@ mod platform {
                     ..Default::default()
                 }
                 .into(),
-            ]
+            ];
+            // After the background switch: title, detail, separator, Sync now, background.
+            if let Some(accounts) = accounts {
+                items.insert(5, accounts);
+            }
+            items
         }
     }
 
