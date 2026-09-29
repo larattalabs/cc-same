@@ -292,23 +292,7 @@ impl Store {
         self.switched_on_at = on.then(Instant::now);
         self.run_task(Busy::Service, cx, move |ctx| {
             if on {
-                if !ctx.paths.config_file().exists() {
-                    ctx.config().save(&ctx.paths)?;
-                }
-                let exe = std::env::current_exe()?;
-                if cfg!(target_os = "macos") {
-                    // The app's signature covers its executable only inside the app: macOS
-                    // refuses to run a copy, so the agent runs this very file, which has to stay.
-                    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-                    if update::temporary_place(&exe) {
-                        anyhow::bail!("{}", t("background.move_first"));
-                    }
-                    service::install_in_place(ctx, &exe)?;
-                    // The copy an earlier version ran is of no more use.
-                    let _ = std::fs::remove_file(ctx.paths.bin_dir().join(AGENT_NAME));
-                } else {
-                    service::install(ctx, &exe, AGENT_NAME)?;
-                }
+                install_agent(ctx)?;
             } else {
                 service::uninstall(ctx)?;
             }
@@ -367,8 +351,9 @@ impl Store {
     }
 
     /// Set the background agent up again when it no longer matches this app (once, at the first
-    /// reading): after an update it still runs the old version, and on macOS 0.1.0 and 0.1.1
-    /// registered a copy of the app that the system refuses to run.
+    /// reading): after an update it still runs the old version; it is installed but not loaded
+    /// (a restart that failed); or, on macOS, 0.1.0 and 0.1.1 registered a copy of the app that the
+    /// system refuses to run. Quietly: the background switch shows how that went.
     fn renew_agent(&mut self, cx: &mut Context<Self>) {
         let Some(overview) = self.overview.clone() else { return };
         if std::mem::replace(&mut self.agent_checked, true) || !overview.service.installed || !update::self_managing() {
@@ -379,9 +364,26 @@ impl Store {
             .as_ref()
             .and_then(|h| semver::Version::parse(&h.version).ok())
             .is_some_and(|v| v < update::current());
-        if behind || agent_outdated(&overview.service.program, &self.ctx.paths.bin_dir()) {
-            self.set_background(true, cx);
+        let unloaded = overview.service.loaded == Some(false);
+        let outdated = agent_outdated(&overview.service.program, &self.ctx.paths.bin_dir());
+        if !(behind || unloaded || outdated) || self.busy.is_some() {
+            return;
         }
+        self.busy = Some(Busy::Service);
+        self.switched_on_at = Some(Instant::now());
+        cx.notify();
+        let ctx = self.ctx.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { install_agent(&ctx) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.busy = None;
+                if let Err(e) = result {
+                    eprintln!("setting the background agent up again: {e:#}");
+                }
+                this.refresh(cx);
+            });
+        })
+        .detach();
     }
 
     // ------------------------------------------------------------------ updates
@@ -677,6 +679,28 @@ impl Store {
             })
             .detach();
     }
+}
+
+/// Register this app as the background agent and start it.
+fn install_agent(ctx: &Ctx) -> anyhow::Result<()> {
+    if !ctx.paths.config_file().exists() {
+        ctx.config().save(&ctx.paths)?;
+    }
+    let exe = std::env::current_exe()?;
+    if cfg!(target_os = "macos") {
+        // The app's signature covers its executable only inside the app: macOS refuses to run a
+        // copy, so the agent runs this very file, which has to stay.
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        if update::temporary_place(&exe) {
+            anyhow::bail!("{}", t("background.move_first"));
+        }
+        service::install_in_place(ctx, &exe)?;
+        // The copy an earlier version ran is of no more use.
+        let _ = std::fs::remove_file(ctx.paths.bin_dir().join(AGENT_NAME));
+    } else {
+        service::install(ctx, &exe, AGENT_NAME)?;
+    }
+    Ok(())
 }
 
 /// Why a switch did not happen, in words people can act on.

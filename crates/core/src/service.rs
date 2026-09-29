@@ -37,6 +37,9 @@ const LEGACY_DISPLAY_NAME: &str = "Uni Claude";
 pub struct ServiceStatus {
     pub installed: bool,
     pub running: Option<bool>,
+    /// Whether the service manager has the agent loaded, where that is known (macOS). An agent
+    /// that is installed but not loaded never starts.
+    pub loaded: Option<bool>,
     pub detail: String,
     /// The registered command line, when readable.
     pub program: Vec<String>,
@@ -238,8 +241,26 @@ mod platform {
         s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
     }
 
+    fn service(label: &str) -> String {
+        format!("gui/{}/{label}", uid())
+    }
+
+    /// Whether launchd has the job loaded.
+    fn loaded(label: &str) -> bool {
+        run_quiet(Command::new("/bin/launchctl").args(["print", &service(label)])).is_ok_and(|o| o.status.success())
+    }
+
+    /// Unload a job, and wait for launchd to let go of it: `bootout` can return while the job is
+    /// still on its way out, and loading it again then fails ("Input/output error").
     fn bootout(label: &str) {
-        let _ = run_quiet(Command::new("/bin/launchctl").args(["bootout", &format!("gui/{}/{label}", uid())]));
+        if !loaded(label) {
+            return;
+        }
+        let _ = run_quiet(Command::new("/bin/launchctl").args(["bootout", &service(label)]));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while loaded(label) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// The LaunchAgent: `program` at login and whenever it stops, logging to `log`.
@@ -287,15 +308,31 @@ mod platform {
             bootout(legacy);
             let _ = fs::remove_file(plist_path(legacy));
         }
-        bootout(LABEL);
         let path = plist_path(LABEL);
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, plist(program, &ctx.paths.log_file.with_extension("agent.log")))?;
-        let out = run_quiet(Command::new("/bin/launchctl").args(["bootstrap", &format!("gui/{}", uid())]).arg(&path))?;
-        if !out.status.success() {
-            bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        let body = plist(program, &ctx.paths.log_file.with_extension("agent.log"));
+        // The same job, loaded already (after an update, a new program at the same path): restart
+        // it in place, without unloading it.
+        if fs::read_to_string(&path).is_ok_and(|current| current == body) && loaded(LABEL) {
+            let out = run_quiet(Command::new("/bin/launchctl").args(["kickstart", "-k", &service(LABEL)]))?;
+            if out.status.success() {
+                return Ok(());
+            }
         }
-        Ok(())
+        bootout(LABEL);
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, body)?;
+        // launchd may still be letting go of the old job for a moment.
+        let mut error = String::new();
+        for attempt in 1..=5 {
+            let out =
+                run_quiet(Command::new("/bin/launchctl").args(["bootstrap", &format!("gui/{}", uid())]).arg(&path))?;
+            if out.status.success() {
+                return Ok(());
+            }
+            error = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            std::thread::sleep(Duration::from_millis(400 * attempt));
+        }
+        bail!("launchctl bootstrap failed: {error}")
     }
 
     pub fn unregister(_ctx: &Ctx) -> Result<()> {
@@ -330,7 +367,7 @@ mod platform {
             };
         }
         let program = fs::read_to_string(&path).ok().map(|p| program_arguments(&p)).unwrap_or_default();
-        let out = run_quiet(Command::new("/bin/launchctl").args(["print", &format!("gui/{}/{LABEL}", uid())]));
+        let out = run_quiet(Command::new("/bin/launchctl").args(["print", &service(LABEL)]));
         let running = out.ok().filter(|o| o.status.success()).map(|o| {
             let text = String::from_utf8_lossy(&o.stdout).into_owned();
             text.lines().any(|l| l.trim() == "state = running")
@@ -340,7 +377,8 @@ mod platform {
             Some(false) => "loaded, not running",
             None => "installed, not loaded",
         };
-        ServiceStatus { installed: true, running, detail: detail.into(), program, legacy }
+        let loaded = Some(running.is_some());
+        ServiceStatus { installed: true, running, loaded, detail: detail.into(), program, legacy }
     }
 }
 
@@ -413,6 +451,7 @@ mod platform {
                 ServiceStatus {
                     installed: true,
                     running: None,
+                    loaded: None,
                     detail: "registered to start at login".into(),
                     program: vec![line],
                     legacy: false,

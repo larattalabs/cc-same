@@ -3,6 +3,16 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Fixed
+
+- **Background sync stopped after updating** on macOS, with “launchctl bootstrap failed: 5:
+  Input/output error”. After an update the app restarts the background agent: it now restarts it
+  in place, waits for launchd to let go of the old one when it has to load it again, and retries.
+  An agent that is switched on but not loaded is set up again by itself when the app opens, and a
+  failure there no longer shows an error: the background switch says how it stands.
+
 ## 0.1.3 - 2026-09-29
 
 ### New
