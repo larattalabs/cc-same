@@ -71,16 +71,17 @@ pub fn run() {
             KeyBinding::new("ctrl-,", view::OpenSettings, Some("UniApp")),
         ]);
         set_menus(cx);
-        Shell::init(store.clone(), cx);
-        // Without a tray icon there is nothing left to use once the window closes.
+        Shell::init(store, cx);
+        // Without a tray icon (turned off, or a desktop that shows none) there is nothing left to
+        // use once the window closes.
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() && !Store::global(cx).read(cx).config().tray {
+            if cx.windows().is_empty() && !Shell::has_tray(cx) {
                 cx.quit();
             }
         })
         .detach();
         // At login the app starts quietly in the tray; otherwise it opens its window.
-        if !(login::started_hidden() && store.read(cx).config().tray) {
+        if !(login::started_hidden() && Shell::has_tray(cx)) {
             show_window(cx);
         }
     });
@@ -114,6 +115,9 @@ fn set_menus(cx: &mut App) {
 struct Shell {
     language: String,
     tray: Option<Tray>,
+    /// The tray icon could not be added, say on a Linux desktop without StatusNotifier support.
+    /// Tried again once the setting is turned off and on, not on every refresh.
+    tray_failed: bool,
     _settings: Subscription,
 }
 
@@ -123,8 +127,13 @@ impl Shell {
     fn init(store: Entity<Store>, cx: &mut App) {
         let language = store.read(cx).config().language;
         let settings = cx.observe(&store, |store, cx| Shell::follow(&store, cx));
-        cx.set_global(Shell { language, tray: None, _settings: settings });
+        cx.set_global(Shell { language, tray: None, tray_failed: false, _settings: settings });
         Shell::follow(&store, cx);
+    }
+
+    /// Whether a tray icon is actually showing, not just turned on.
+    fn has_tray(cx: &App) -> bool {
+        cx.try_global::<Shell>().is_some_and(|shell| shell.tray.is_some())
     }
 
     fn follow(store: &Entity<Store>, cx: &mut App) {
@@ -136,19 +145,26 @@ impl Shell {
             cx.global_mut::<Shell>().language = config.language.clone();
         }
         let status = tray::Status::of(store.read(cx));
-        let has_tray = cx.global::<Shell>().tray.is_some();
-        match (config.tray, has_tray) {
-            (true, false) => match Tray::install(&status, Rc::new(on_tray), cx) {
+        let shell = cx.global::<Shell>();
+        match (config.tray, shell.tray.is_some(), shell.tray_failed) {
+            (true, false, false) => match Tray::install(&status, Rc::new(on_tray), cx) {
                 Ok(tray) => cx.global_mut::<Shell>().tray = Some(tray),
-                Err(e) => store.read(cx).ctx.log(format!("tray: {e:#}")),
+                Err(e) => {
+                    store.read(cx).ctx.log(format!("tray: {e:#}"));
+                    cx.global_mut::<Shell>().tray_failed = true;
+                }
             },
-            (false, true) => cx.global_mut::<Shell>().tray = None,
-            (true, true) => {
+            (true, true, _) => {
                 if let Some(tray) = &cx.global::<Shell>().tray {
                     tray.update(&status);
                 }
             }
-            (false, false) => {}
+            (false, true, _) | (false, false, true) => {
+                let shell = cx.global_mut::<Shell>();
+                shell.tray = None;
+                shell.tray_failed = false;
+            }
+            (true, false, true) | (false, false, false) => {}
         }
     }
 }

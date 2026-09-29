@@ -54,6 +54,9 @@ or the archive for `windows-x64`, `linux-x64` or `linux-arm64`. Open it and swit
 - The Windows build is not code-signed yet, so SmartScreen may ask first: **More info → Run anyway**.
 - On Linux, unpack the archive into `~/.local`:
   `tar -xzf CC-Same-<version>-linux-x64.tar.gz -C ~/.local --strip-components=1`.
+  The tray icon needs StatusNotifier support: KDE has it, and so does GNOME with the AppIndicator
+  extension (on by default in Ubuntu). Without it, closing the window quits the app; background
+  sync keeps running either way.
 
 **Command line.**
 
