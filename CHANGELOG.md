@@ -3,13 +3,13 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
-## Unreleased
+## 0.1.3 - 2026-09-29
 
 ### New
 
 - **Switch accounts in one click** (macOS). Each account in the window has **Switch**, and the menu
   bar has **Switch Account**: Claude restarts signed in to the other account, without signing out
-  of either. CC Same keeps each account's sign-in on this Mac, as Claude stored it, and trades them
+  of either. CC Same keeps each account’s sign-in on this Mac, as Claude stored it, and trades them
   while Claude restarts. To add an account, **Sign in** (or **+**) restarts Claude on its sign-in
   page; the account you were using stays one click away. On the command line: `cc-same accounts`,
   `cc-same switch`, `cc-same sign-in` and `cc-same forget`.
