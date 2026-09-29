@@ -20,8 +20,9 @@ fn main() -> anyhow::Result<()> {
 mod mac {
     use cc_same_app::i18n;
     use cc_same_app::model::Busy;
-    use cc_same_app::store::Store;
+    use cc_same_app::store::{Store, UpdatePhase, Updates};
     use cc_same_app::theme::{self, ThemeChoice};
+    use cc_same_app::update::{self, Asset, Problem, Release};
     use cc_same_app::view::UniApp;
     use cc_same_core::config::{LastSync, PendingRestart};
     use cc_same_core::report::{self, Overview};
@@ -34,6 +35,7 @@ mod mac {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
     use std::time::Duration;
 
     const ADA: (&str, &str) = ("5a1d3c07-8f2e-4b6a-9c1d-2e3f4a5b6c7d", "0f1e2d3c-4b5a-4968-8776-655443322110");
@@ -48,6 +50,18 @@ mod mac {
         None,
         Settings,
         ConfirmRestore,
+        Notes,
+    }
+
+    /// Where an update stands in a scene.
+    #[derive(Clone, Copy)]
+    enum Update {
+        None,
+        Available,
+        Downloading,
+        Ready,
+        Failed,
+        Updated,
     }
 
     struct Scene {
@@ -56,11 +70,23 @@ mod mac {
         language: &'static str,
         overlay: Overlay,
         busy: Option<Busy>,
+        update: Update,
+        /// Tall enough to show the whole settings sheet.
+        tall: bool,
         build: fn(&Sample) -> Option<Overview>,
     }
 
     fn scene(name: &'static str, theme: ThemeChoice, build: fn(&Sample) -> Option<Overview>) -> Scene {
-        Scene { name, theme, language: "en", overlay: Overlay::None, busy: None, build }
+        Scene {
+            name,
+            theme,
+            language: "en",
+            overlay: Overlay::None,
+            busy: None,
+            update: Update::None,
+            tall: false,
+            build,
+        }
     }
 
     pub fn main() -> anyhow::Result<()> {
@@ -97,6 +123,31 @@ mod mac {
             Scene { language: "pt-BR", ..scene("pt-BR-linked-light", Light, linked) },
             Scene { language: "ru", ..scene("ru-restart-light", Light, restart) },
             Scene { language: "zh-TW", overlay: Overlay::ConfirmRestore, ..scene("zh-TW-confirm-light", Light, quit) },
+            Scene { update: Update::Available, ..scene("update-available-light", Light, in_sync) },
+            Scene { update: Update::Downloading, ..scene("update-downloading-dark", Dark, in_sync) },
+            Scene { update: Update::Ready, ..scene("update-ready-light", Light, in_sync) },
+            Scene { update: Update::Failed, ..scene("update-failed-light", Light, in_sync) },
+            Scene { update: Update::Updated, ..scene("update-done-dark", Dark, in_sync) },
+            Scene { update: Update::Available, overlay: Overlay::Notes, ..scene("update-notes-light", Light, in_sync) },
+            Scene {
+                update: Update::Available,
+                overlay: Overlay::Settings,
+                tall: true,
+                ..scene("update-settings-light", Light, in_sync)
+            },
+            Scene {
+                language: "zh-CN",
+                update: Update::Available,
+                ..scene("zh-CN-update-available-light", Light, in_sync)
+            },
+            Scene { language: "zh-CN", update: Update::Updated, ..scene("zh-CN-update-done-light", Light, in_sync) },
+            Scene {
+                language: "zh-CN",
+                update: Update::Downloading,
+                overlay: Overlay::Settings,
+                tall: true,
+                ..scene("zh-CN-update-settings-dark", Dark, in_sync)
+            },
         ];
 
         let text_system = gpui_kit::platform::current_platform(true).text_system();
@@ -115,7 +166,8 @@ mod mac {
             let overview = Some(report::overview(&ctx));
             let snapshots = cc_same_core::snapshot::list(&ctx);
             i18n::apply(&ctx.config().language);
-            capture(&mut cx, &out.join("live.png"), ctx, overview, snapshots, None, Overlay::None)?;
+            let shot = Shot { busy: None, update: Update::None, overlay: Overlay::None, height: HEIGHT };
+            capture(&mut cx, &out.join("live.png"), ctx, overview, snapshots, shot)?;
             return Ok(());
         }
         for scene in scenes.iter().filter(|s| only.is_empty() || only.iter().any(|o| s.name.contains(o.as_str()))) {
@@ -126,9 +178,19 @@ mod mac {
             i18n::apply(scene.language);
             let overview = (scene.build)(&sample);
             let path = out.join(format!("{}.png", scene.name));
-            capture(&mut cx, &path, sample.ctx.clone(), overview, sample_snapshots(), scene.busy, scene.overlay)?;
+            let height = if scene.tall { 1560. } else { HEIGHT };
+            let shot = Shot { busy: scene.busy, update: scene.update, overlay: scene.overlay, height };
+            capture(&mut cx, &path, sample.ctx.clone(), overview, sample_snapshots(), shot)?;
         }
         Ok(())
+    }
+
+    /// How a scene is shown: what is running, what is open on top, and how tall the window is.
+    struct Shot {
+        busy: Option<Busy>,
+        update: Update,
+        overlay: Overlay,
+        height: f32,
     }
 
     fn capture(
@@ -137,12 +199,13 @@ mod mac {
         ctx: Arc<Ctx>,
         overview: Option<Overview>,
         snapshots: Vec<Manifest>,
-        busy: Option<Busy>,
-        overlay: Overlay,
+        shot: Shot,
     ) -> anyhow::Result<()> {
+        let Shot { busy, update, overlay, height } = shot;
         let store = cx.update(|cx| Store::preview(ctx, overview, snapshots, busy, cx));
+        cx.update(|cx| store.update(cx, |store, _| store.updates = sample_updates(update)));
         let mut view: Option<Entity<UniApp>> = None;
-        let window = cx.open_window(size(px(WIDTH), px(HEIGHT)), |window, cx| {
+        let window = cx.open_window(size(px(WIDTH), px(height)), |window, cx| {
             let app = cx.new(|cx| UniApp::still(store, cx));
             view = Some(app.clone());
             cx.new(|cx| Root::new(app, window, cx))
@@ -156,6 +219,11 @@ mod mac {
                 Overlay::ConfirmRestore => {
                     let snapshot = sample_snapshots().remove(0);
                     this.confirm_restore(&snapshot, window, cx);
+                }
+                Overlay::Notes => {
+                    let release = sample_release();
+                    let title = i18n::tf("update.notes_title", &[("version", &release.version)]);
+                    cc_same_app::view::open_notes(title, release.notes, window, cx);
                 }
             })
         })?;
@@ -380,5 +448,42 @@ mod mac {
             snap("20260929-171933-watch", "watch", 3),
             snap("20260929-190455-app", "app", 3),
         ]
+    }
+
+    /// A release after this one, with this version's notes.
+    fn sample_release() -> Release {
+        let notes = update::changes_since(Some(&semver::Version::new(0, 1, 0)));
+        let notes = notes.lines().skip(1).collect::<Vec<_>>().join("\n").trim().to_string();
+        Release {
+            version: semver::Version::new(0, 2, 0),
+            notes,
+            page: "https://github.com/songkeys/cc-same/releases/tag/v0.2.0".into(),
+            asset: Some(Asset {
+                name: "CC-Same-0.2.0-macos-arm64.zip".into(),
+                url: "https://github.com/songkeys/cc-same/releases/download/v0.2.0/CC-Same-0.2.0-macos-arm64.zip"
+                    .into(),
+                size: 1000,
+                sha256: None,
+            }),
+        }
+    }
+
+    fn sample_updates(update: Update) -> Updates {
+        let mut updates = Updates::default();
+        updates.checked_at = Some(fsx::now_secs() - 300.);
+        match update {
+            Update::None => {}
+            Update::Updated => updates.updated_from = Some("0.1.0".into()),
+            _ => updates.available = Some(sample_release()),
+        }
+        updates.phase = match update {
+            Update::Downloading => UpdatePhase::Downloading(Arc::new(AtomicU64::new(420))),
+            Update::Ready => UpdatePhase::Ready(PathBuf::from("/tmp/CC Same.app")),
+            _ => UpdatePhase::Idle,
+        };
+        if let Update::Failed = update {
+            updates.problem = Some((Problem::ReadOnly, "Permission denied (os error 13)".into()));
+        }
+        updates
     }
 }

@@ -1,9 +1,9 @@
 //! The menu bar (macOS) and notification area (Windows, Linux) icon: the headline at a glance,
 //! Sync now, the background switch, and the way back to the window.
 
-use crate::i18n::t;
+use crate::i18n::{t, tf};
 use crate::model::Busy;
-use crate::store::Store;
+use crate::store::{Store, UpdatePhase};
 use gpui_kit::App;
 use std::rc::Rc;
 
@@ -14,6 +14,8 @@ pub enum Command {
     SyncNow,
     ToggleBackground,
     Settings,
+    /// Install the new version, or look for one.
+    Update,
     Quit,
 }
 
@@ -32,6 +34,9 @@ pub struct Status {
     pub background_label: String,
     pub open: String,
     pub settings: String,
+    /// "Check for Updates…", or "Update to 0.2.0…" once there is one.
+    pub update: String,
+    pub update_enabled: bool,
     pub quit: String,
 }
 
@@ -39,6 +44,12 @@ impl Status {
     pub fn of(store: &Store) -> Status {
         let mood = store.mood();
         let idle = store.busy.is_none();
+        let (update, update_enabled) = match (&store.updates.phase, &store.updates.available) {
+            (UpdatePhase::Checking, _) => (t("app.checking_updates"), false),
+            (UpdatePhase::Downloading(_) | UpdatePhase::Installing, _) => (t("app.updating"), false),
+            (_, Some(release)) => (tf("app.update_to", &[("version", &release.version)]), true),
+            (_, None) => (t("app.check_updates"), true),
+        };
         Status {
             title: mood.title(),
             detail: mood.detail(),
@@ -50,6 +61,8 @@ impl Status {
             background_label: t("background.title"),
             open: t("app.open"),
             settings: t("app.settings"),
+            update,
+            update_enabled,
             quit: t("app.quit"),
         }
     }
@@ -111,6 +124,7 @@ mod platform {
         background: CheckMenuItem,
         open: MenuItem,
         settings: MenuItem,
+        update: MenuItem,
         quit: MenuItem,
         last: RefCell<Status>,
         _events: Task<()>,
@@ -125,6 +139,7 @@ mod platform {
                 CheckMenuItem::new(&status.background_label, status.background_enabled, status.background, None);
             let open = MenuItem::new(&status.open, true, None);
             let settings = MenuItem::new(&status.settings, true, None);
+            let update = MenuItem::new(&status.update, status.update_enabled, None);
             let quit = MenuItem::new(&status.quit, true, None);
             let menu = Menu::new();
             menu.append_items(&[
@@ -136,6 +151,7 @@ mod platform {
                 &PredefinedMenuItem::separator(),
                 &open,
                 &settings,
+                &update,
                 &PredefinedMenuItem::separator(),
                 &quit,
             ])?;
@@ -154,6 +170,7 @@ mod platform {
                 (background.id().clone(), Command::ToggleBackground),
                 (open.id().clone(), Command::Open),
                 (settings.id().clone(), Command::Settings),
+                (update.id().clone(), Command::Update),
                 (quit.id().clone(), Command::Quit),
             ];
             let tray_id = icon.id().clone();
@@ -193,6 +210,7 @@ mod platform {
                 background,
                 open,
                 settings,
+                update,
                 quit,
                 last: RefCell::new(status.clone()),
                 _events: events,
@@ -213,6 +231,8 @@ mod platform {
             self.background.set_checked(status.background);
             self.open.set_text(&status.open);
             self.settings.set_text(&status.settings);
+            self.update.set_text(&status.update);
+            self.update.set_enabled(status.update_enabled);
             self.quit.set_text(&status.quit);
             let _ = self.icon.set_tooltip(Some(status.tooltip()));
             if last.attention != status.attention
@@ -302,6 +322,13 @@ mod platform {
                 StandardItem {
                     label: s.settings.clone(),
                     activate: Box::new(|this: &mut Self| this.send(Command::Settings)),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: s.update.clone(),
+                    enabled: s.update_enabled,
+                    activate: Box::new(|this: &mut Self| this.send(Command::Update)),
                     ..Default::default()
                 }
                 .into(),

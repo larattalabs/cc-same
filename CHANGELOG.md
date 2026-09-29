@@ -1,0 +1,41 @@
+# Changelog
+
+What changed in each version of CC Same. The app shows these notes after it updates, and under
+Settings › Updates.
+
+## 0.1.1 - 2026-09-29
+
+### New
+
+- **Updates inside the app.** CC Same looks for a new version on GitHub once a day, downloads it in
+  the background, checks it, and installs it when its window is closed or it quits. **Update** in
+  the window installs it right away. Settings › Updates turns either off and shows what changed in
+  each version.
+- **Check for Updates…** in the menu bar / tray menu and in the app menu.
+
+### Fixed
+
+- **No false alarm about transcripts.** Since Claude Code 2.1.248, the transcripts of Claude Desktop
+  sessions are kept at any age unless a setting limits them. CC Same now reads the settings that
+  apply (yours, your organization’s, and which Claude Code you have) and warns only when a
+  transcript would really be deleted. **Keep them** can be undone from Settings, and
+  `cc-same retention` explains the same, with `--keep` and `--undo`.
+- **“On, but not running” right after switching on.** The background switch now says the agent is
+  starting, and the agent checks in every 15 seconds, even during a long sync.
+- **The background item in System Settings** is listed as CC Same, with its icon, instead of under
+  the name on the developer’s certificate. The background agent is updated along with the app.
+
+## 0.1.0 - 2026-09-29
+
+The first release: keep Claude Desktop’s local sessions identical across all your accounts. Sign
+out, sign in with another account, and everything is still there.
+
+- Every account's local Code sessions stay in step: titles, archive state, deletions, scheduled
+  tasks and task suggestions. Local Cowork sessions are optional (experimental).
+- The index Claude Desktop has loaded is never touched. CC Same mirrors it to the other accounts,
+  and catches up the one you left after you switch accounts or quit.
+- Snapshots before the first change and at most hourly afterwards, restorable from Settings or with
+  `cc-same restore`. Anything removed or replaced goes to a trash folder for 30 days.
+- A small app with a menu bar / tray icon and an optional quiet start at login, in light and dark,
+  and in 10 languages.
+- A command-line tool on the same engine: `doctor`, `plan`, `sync`, `install`, `restore` and more.

@@ -13,6 +13,7 @@ mod settings;
 pub mod store;
 pub mod theme;
 mod tray;
+pub mod update;
 pub mod view;
 
 use crate::store::Store;
@@ -29,7 +30,7 @@ use std::sync::Arc;
 pub const APP_ID: &str = "io.github.songkeys.cc-same";
 pub const APP_NAME: &str = "CC Same";
 
-actions!(cc_same_app, [Quit, CloseWindow]);
+actions!(cc_same_app, [Quit, CloseWindow, CheckForUpdates]);
 
 /// The shared context for this process: default paths (or `CC_SAME_*` overrides).
 pub fn context() -> Arc<Ctx> {
@@ -51,6 +52,7 @@ pub fn window_options(cx: &mut App) -> WindowOptions {
 
 pub fn run() {
     let ctx = context();
+    update::finish(&ctx.paths);
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets).with_quit_mode(QuitMode::Explicit);
     // Clicking the Dock icon brings the window back.
     app.on_reopen(show_window);
@@ -60,7 +62,8 @@ pub fn run() {
         i18n::apply(&ctx.config().language);
         theme::install(cx);
         let store = Store::init(ctx.clone(), cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| quit(cx));
+        cx.on_action(|_: &CheckForUpdates, cx| on_tray(Command::Update, cx));
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", CloseWindow, Some("UniApp")),
@@ -75,8 +78,14 @@ pub fn run() {
         // Without a tray icon (turned off, or a desktop that shows none) there is nothing left to
         // use once the window closes.
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() && !Shell::has_tray(cx) {
-                cx.quit();
+            if !cx.windows().is_empty() {
+                return;
+            }
+            if Shell::has_tray(cx) {
+                // Nobody is looking: the moment for an update that is ready.
+                Store::global(cx).update(cx, |store, cx| store.install_when_idle(cx));
+            } else {
+                quit(cx);
             }
         })
         .detach();
@@ -106,6 +115,7 @@ pub fn show_window(cx: &mut App) {
 fn set_menus(cx: &mut App) {
     cx.set_menus([Menu::new(APP_NAME).items([
         MenuItem::action(i18n::t("app.settings"), view::OpenSettings),
+        MenuItem::action(i18n::t("app.check_updates"), CheckForUpdates),
         MenuItem::separator(),
         MenuItem::action(i18n::t("app.quit"), Quit),
     ])]);
@@ -190,6 +200,16 @@ fn on_tray(command: Command, cx: &mut App) {
                 });
             }
         }
-        Command::Quit => cx.quit(),
+        Command::Update => {
+            show_window(cx);
+            store.update(cx, |s, cx| s.update_or_check(cx));
+        }
+        Command::Quit => quit(cx),
     }
+}
+
+/// Quit, putting a downloaded update in place on the way out when updates install by themselves.
+fn quit(cx: &mut App) {
+    Store::global(cx).update(cx, |store, _| store.install_on_quit());
+    cx.quit();
 }

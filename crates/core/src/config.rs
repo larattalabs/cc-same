@@ -38,6 +38,11 @@ pub struct Config {
     pub language: String,
     /// Desktop app: show the menu bar / notification area icon.
     pub tray: bool,
+    /// Desktop app: look for a new version on GitHub once a day.
+    pub check_updates: bool,
+    /// Desktop app: download new versions in the background and install them while the window
+    /// is closed.
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -54,6 +59,8 @@ impl Default for Config {
             appearance: "system".into(),
             language: "system".into(),
             tray: true,
+            check_updates: true,
+            auto_update: true,
         }
     }
 }

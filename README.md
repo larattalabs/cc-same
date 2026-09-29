@@ -42,13 +42,15 @@ comes as a small desktop app and a command-line tool. Both share one engine.
   Português (Brasil) and Русский, following the system unless you pick one. Light and dark follow
   the system too.
 - **Undo built in.** Snapshots of every session list, restorable from Settings.
+- **Keeps itself up to date.** A new version downloads in the background and installs when the
+  window is closed or the app quits; *What's new* shows what changed.
 
 ## Install
 
 **App.** Download `CC-Same-<version>-<platform>` from
 [Releases](https://github.com/songkeys/cc-same/releases): the `.dmg` for `macos-arm64` or `macos-x64`,
 or the archive for `windows-x64`, `linux-x64` or `linux-arm64`. Open it and switch on
-**Sync in the background**. That's all.
+**Sync in the background**. That's all: from then on the app updates itself (Settings › Updates).
 
 - The Mac app is signed with a Developer ID and notarized by Apple.
 - The Windows build is not code-signed yet, so SmartScreen may ask first: **More info → Run anyway**.
@@ -120,7 +122,8 @@ folder. CC Same can undo that setup for you (`cc-same fix-symlinks`).
   appeared or changed since planning.
 - Fields that belong to one account (its connectors, Remote Control mirrors, published
   artifacts, pins) never travel to another.
-- No network access. Everything happens on your machine.
+- Syncing needs no network access: everything happens on your machine. The app only goes online
+  to ask GitHub for a new version once a day and to download it; Settings › Updates turns that off.
 
 ## Building from source
 
@@ -143,6 +146,8 @@ libxkbcommon-x11-dev libzstd-dev pkg-config` for the app.
 
 ### Releasing
 
+Bump `version` in `Cargo.toml` and `crates/app/Cargo.toml` and add a `## <version> - <date>` section
+to [CHANGELOG.md](CHANGELOG.md): it becomes the release notes, and the app shows it as *What's new*.
 Pushing a `v*` tag builds every platform and attaches the files to a GitHub release. Mac builds are
 signed with a Developer ID, notarized and stapled when the repository has these (otherwise they are
 ad-hoc signed):

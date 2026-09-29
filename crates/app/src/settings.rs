@@ -1,11 +1,12 @@
 //! The settings sheet: look and language, what syncs, which accounts take part, how long
-//! transcripts last, snapshots to go back to, and where the files are.
+//! transcripts last, snapshots to go back to, where the files are, and updates.
 
 use crate::i18n::{self, t, tf, tn};
 use crate::model;
-use crate::store::Store;
+use crate::store::{Store, UpdatePhase};
 use crate::theme::ThemeChoice;
-use crate::view::UniApp;
+use crate::update;
+use crate::view::{UniApp, open_notes};
 use cc_same_core::Surface;
 use cc_same_core::config::Config;
 use cc_same_core::report::Warning;
@@ -13,6 +14,7 @@ use cc_same_core::retention::Limit;
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonGroup};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
@@ -47,6 +49,7 @@ fn body(store: &Entity<Store>, cx: &mut App) -> impl IntoElement {
     snapshots.reverse();
     let state_dir = this.ctx.paths.state_dir.clone();
     let log = this.ctx.paths.log_file.clone();
+    let updates = this.updates.clone();
     let muted = cx.theme().muted_foreground;
 
     let general = vec![
@@ -271,6 +274,65 @@ fn body(store: &Entity<Store>, cx: &mut App) -> impl IntoElement {
         ),
     ];
 
+    // This version and the latest one, and whether to look for new ones and install them.
+    let status = match (&updates.phase, &updates.available, &updates.problem) {
+        (UpdatePhase::Checking, _, _) => t("update.status.checking"),
+        (UpdatePhase::Downloading(_), Some(release), _) => {
+            let percent = (updates.progress().unwrap_or(0.) * 100.).round() as u32;
+            tf("update.status.downloading", &[("version", &release.version), ("percent", &percent)])
+        }
+        (UpdatePhase::Ready(_), Some(release), _) => tf("update.status.ready", &[("version", &release.version)]),
+        (UpdatePhase::Installing, Some(release), _) => tf("update.installing", &[("version", &release.version)]),
+        (_, _, Some((problem, why))) => format!("{} ({why})", t(problem.message_key())),
+        (_, Some(release), None) => tf("update.status.available", &[("version", &release.version)]),
+        (_, None, None) => match updates.checked_at {
+            Some(at) => tf("update.status.latest", &[("ago", &i18n::ago(at))]),
+            None => t("update.status.unchecked"),
+        },
+    };
+    let action = if updates.working() {
+        Spinner::new().small().into_any_element()
+    } else {
+        let label = match (&updates.phase, &updates.available) {
+            (UpdatePhase::Ready(_), _) => t("update.restart"),
+            (_, Some(_)) => t("update.install"),
+            (_, None) => t("settings.check_now"),
+        };
+        Button::new("update-or-check")
+            .small()
+            .outline()
+            .label(label)
+            .disabled(!idle && updates.available.is_some())
+            .on_click({
+                let store = store.clone();
+                move |_, _, cx| store.update(cx, |s, cx| s.update_or_check(cx))
+            })
+            .into_any_element()
+    };
+    let changelog = Button::new("changelog")
+        .small()
+        .outline()
+        .label(t("settings.show"))
+        .on_click(|_, window, cx| open_notes(t("update.changelog_title"), update::changes_since(None), window, cx));
+    let updating = vec![
+        row(tf("settings.version", &[("version", &update::VERSION)]), Some(status), action, cx),
+        row(
+            t("settings.check_updates"),
+            Some(t("settings.check_updates.detail")),
+            toggle(store, "check-updates", cfg.check_updates, true, |c, on| c.check_updates = on),
+            cx,
+        ),
+        row(
+            t("settings.auto_update"),
+            Some(t("settings.auto_update.detail")),
+            toggle(store, "auto-update", cfg.auto_update && cfg.check_updates, cfg.check_updates, |c, on| {
+                c.auto_update = on
+            }),
+            cx,
+        ),
+        row(t("settings.whats_new"), Some(t("settings.whats_new.detail")), changelog.into_any_element(), cx),
+    ];
+
     v_flex()
         .gap_6()
         .pb_6()
@@ -280,6 +342,7 @@ fn body(store: &Entity<Store>, cx: &mut App) -> impl IntoElement {
         .child(group(t("settings.transcripts"), transcripts, cx))
         .child(group(t("settings.snapshots"), restore, cx))
         .child(group(t("settings.files"), files, cx))
+        .child(group(t("settings.updates"), updating, cx))
         .child(
             div()
                 .text_center()

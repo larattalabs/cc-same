@@ -6,8 +6,9 @@ use crate::hero;
 use crate::i18n::{t, tf, tn};
 use crate::model::{self, Account, Busy, Mood};
 use crate::settings;
-use crate::store::{Store, StoreEvent};
+use crate::store::{Store, StoreEvent, UpdatePhase};
 use crate::theme;
+use crate::update::{self, Release};
 use cc_same_core::Surface;
 use cc_same_core::report::Warning;
 use cc_same_core::retention::Limit;
@@ -16,21 +17,24 @@ use gpui_kit::base::{Easing, Transition, transition};
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, FontWeight,
-    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
+    FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, actions, div, ease_out_quint,
     linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rems,
 };
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 actions!(cc_same, [Refresh, SyncNow, OpenSettings]);
@@ -415,6 +419,7 @@ impl UniApp {
                 "notice-restart",
                 Tone::Info,
                 tn("notice.restart", hint.sessions as usize, &[("account", &open)]),
+                Vec::new(),
                 None,
                 cx,
             ));
@@ -426,14 +431,15 @@ impl UniApp {
                 "notice-errors",
                 Tone::Danger,
                 tn("notice.errors", ls.errors as usize, &[]),
-                Some(
+                vec![
                     Button::new("open-log")
                         .small()
                         .outline()
                         .label(t("notice.show_log"))
                         .on_click(move |_, _, cx| cx.open_with_system(&log))
                         .into_any_element(),
-                ),
+                ],
+                None,
                 cx,
             ));
         }
@@ -462,9 +468,97 @@ impl UniApp {
                     .on_click(move |_, _, cx| store.update(cx, |store, cx| store.keep_transcripts(cx)))
                     .into_any_element()
             });
-            notices.push(notice("notice-retention", Tone::Warning, text, action, cx));
+            notices.push(notice("notice-retention", Tone::Warning, text, action.into_iter().collect(), None, cx));
         }
+        notices.extend(self.render_update_notice(cx));
         notices
+    }
+
+    /// A new version: available, on its way, ready, or just installed.
+    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (updates, busy) = {
+            let store = self.store.read(cx);
+            (store.updates.clone(), store.busy)
+        };
+        let store = self.store.clone();
+        let update_now = |id: &'static str, label: String, enabled: bool| -> AnyElement {
+            let store = store.clone();
+            Button::new(id)
+                .small()
+                .primary()
+                .label(label)
+                .disabled(!enabled)
+                .on_click(move |_, _, cx| store.update(cx, |store, cx| store.update_or_check(cx)))
+                .into_any_element()
+        };
+        let Some(release) = updates.available.clone() else {
+            // Just updated: what changed since the version before.
+            let from = updates.updated_from.clone()?;
+            let notes = update::changes_since(semver::Version::parse(&from).ok().as_ref());
+            let title = tf("update.notes_title", &[("version", &update::VERSION)]);
+            let dismiss = {
+                let store = store.clone();
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| store.update(cx, |s, cx| s.dismiss_updated(cx))
+            };
+            let read = Button::new("updated-notes").small().outline().label(t("update.whats_new")).on_click({
+                let dismiss = dismiss.clone();
+                move |event, window, cx| {
+                    open_notes(title.clone(), notes.clone(), window, cx);
+                    dismiss(event, window, cx);
+                }
+            });
+            let close = Button::new("updated-close").ghost().xsmall().icon(IconName::Close).on_click(dismiss);
+            let text = tf("update.updated", &[("version", &update::VERSION)]);
+            return Some(notice(
+                "notice-updated",
+                Tone::New,
+                text,
+                vec![read.into_any_element()],
+                Some(close.into_any_element()),
+                cx,
+            ));
+        };
+        let version = release.version.to_string();
+        let whats_new = release_notes_button(&release);
+        let (tone, text, actions) = match &updates.phase {
+            UpdatePhase::Downloading(_) => {
+                let percent = updates.progress().unwrap_or(0.) * 100.;
+                let bar = div().w_full().pt_0p5().child(Progress::new("update-progress").value(percent));
+                (Tone::Update, tf("update.downloading", &[("version", &version)]), vec![bar.into_any_element()])
+            }
+            UpdatePhase::Installing => (Tone::Update, tf("update.installing", &[("version", &version)]), Vec::new()),
+            UpdatePhase::Ready(_) => (
+                Tone::Update,
+                tf("update.ready", &[("version", &version)]),
+                vec![update_now("update-restart", t("update.restart"), busy.is_none()), whats_new],
+            ),
+            UpdatePhase::Idle | UpdatePhase::Checking => match &updates.problem {
+                Some((problem, _)) => {
+                    let page = release.page.clone();
+                    let download = Button::new("update-download")
+                        .small()
+                        .outline()
+                        .icon(IconName::ExternalLink)
+                        .label(t("update.download"))
+                        .on_click(move |_, _, cx| cx.open_url(&page));
+                    let retry = Button::new("update-retry").small().outline().label(t("update.retry")).on_click({
+                        let store = store.clone();
+                        move |_, _, cx| store.update(cx, |store, cx| store.update_or_check(cx))
+                    });
+                    (
+                        Tone::Warning,
+                        t(problem.message_key()),
+                        vec![retry.disabled(updates.working()).into_any_element(), download.into_any_element()],
+                    )
+                }
+                None => (
+                    Tone::Update,
+                    tf("update.available", &[("version", &version)]),
+                    vec![update_now("update-now", t("update.install"), !updates.working()), whats_new],
+                ),
+            },
+        };
+        Some(notice("notice-update", tone, text, actions, None, cx))
     }
 }
 
@@ -587,20 +681,38 @@ fn emphasize_numbers(text: String, color: Hsla) -> StyledText {
     StyledText::new(text).with_highlights(runs)
 }
 
+// Two Lucide icons (ISC license) that GPUI Kit's default icon set leaves out.
+const CIRCLE_ARROW_UP: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4"/><path d="M12 16V8"/></svg>"#;
+const SPARKLES: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></svg>"#;
+
 #[derive(Clone, Copy)]
 enum Tone {
     Info,
     Warning,
     Danger,
+    /// A new version is available or on its way.
+    Update,
+    /// This version is new.
+    New,
 }
 
-/// A short note with an optional action, tinted by what it is about. It slides in once.
-fn notice(id: &'static str, tone: Tone, text: String, action: Option<AnyElement>, cx: &App) -> AnyElement {
+/// A short note with its actions, tinted by what it is about, and a close button when it can be
+/// put away. It slides in once.
+fn notice(
+    id: &'static str,
+    tone: Tone,
+    text: String,
+    actions: Vec<AnyElement>,
+    close: Option<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let (icon, color) = match tone {
-        Tone::Info => (IconName::Info, theme.info),
-        Tone::Warning => (IconName::TriangleAlert, theme.warning),
-        Tone::Danger => (IconName::CircleAlert, theme.danger),
+        Tone::Info => (Icon::new(IconName::Info), theme.info),
+        Tone::Warning => (Icon::new(IconName::TriangleAlert), theme.warning),
+        Tone::Danger => (Icon::new(IconName::CircleAlert), theme.danger),
+        Tone::Update => (Icon::default().data(CIRCLE_ARROW_UP), theme.primary),
+        Tone::New => (Icon::default().data(SPARKLES), theme.primary),
     };
     h_flex()
         .id(id)
@@ -613,19 +725,51 @@ fn notice(id: &'static str, tone: Tone, text: String, action: Option<AnyElement>
         .bg(color.opacity(if theme.is_dark() { 0.09 } else { 0.06 }))
         .border_1()
         .border_color(color.opacity(0.22))
-        .child(div().pt(px(2.)).child(Icon::new(icon).small().text_color(color)))
+        .child(div().pt(px(2.)).child(icon.small().text_color(color)))
         .child(
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .gap_2p5()
                 .child(div().text_size(rems(0.923)).line_height(rems(1.3)).child(text))
-                .when_some(action, |el, action| el.child(h_flex().child(action))),
+                .when(!actions.is_empty(), |el| el.child(h_flex().gap_2().children(actions))),
         )
+        .when_some(close, |el, close| el.child(div().mt(px(-3.)).mr(px(-6.)).child(close)))
         .with_animation(
             ElementId::Name(format!("{id}-enter").into()),
             Animation::new(Duration::from_millis(320)).with_easing(ease_out_quint()),
             |el, t| el.opacity(t).top(px(-6. * (1. - t))),
         )
         .into_any_element()
+}
+
+/// "What's new" for a release: its notes from GitHub.
+fn release_notes_button(release: &Release) -> AnyElement {
+    let title = tf("update.notes_title", &[("version", &release.version)]);
+    let notes = release.notes.clone();
+    Button::new("update-notes")
+        .small()
+        .ghost()
+        .label(t("update.whats_new"))
+        .on_click(move |_, window, cx| open_notes(title.clone(), notes.clone(), window, cx))
+        .into_any_element()
+}
+
+/// Release notes, in Markdown, in a dialog.
+pub fn open_notes(title: String, notes: String, window: &mut Window, cx: &mut App) {
+    let notes: SharedString = if notes.trim().is_empty() { t("update.no_notes").into() } else { notes.into() };
+    // Headings stay below the dialog's title: a version, then its sections.
+    let style = TextViewStyle {
+        paragraph_gap: rems(0.75),
+        heading_font_size: Some(Arc::new(|level, _| px(if level <= 2 { 15. } else { 13. }))),
+        ..TextViewStyle::default()
+    };
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog.title(title.clone()).w(px(380.)).child(
+            TextView::markdown("release-notes", notes.clone())
+                .style(style.clone())
+                .text_size(rems(0.923))
+                .selectable(true),
+        )
+    });
 }

@@ -116,11 +116,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # The release notes are the version's section of CHANGELOG.md; the app shows them too.
+      - name: Release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$1 == "##" && f { exit } $1 == "##" && $2 == v { f = 1; next } f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md" || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: ${{ runner.temp }}/notes.md
           generate_release_notes: true

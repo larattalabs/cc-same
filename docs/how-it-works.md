@@ -125,6 +125,9 @@ flashes), and a systemd user service on Linux, with an XDG autostart fallback. T
 - runs a full pass every minute anyway;
 - writes a heartbeat to `<state>/agent.json` every 15 seconds, which the app reads.
 
+On macOS the LaunchAgent names the app it belongs to (`AssociatedBundleIdentifiers`), so System
+Settings lists it as CC Same rather than under the name on the signing certificate.
+
 It needs no network access. A full pass over three accounts with about 200 sessions each peaks at
 roughly 25 MB of memory.
 
@@ -143,7 +146,32 @@ The app never syncs by itself: it reads, and runs the engine when you press *Syn
 background switch installs the same agent as `cc-same install`.
 
 Its preferences live next to the sync settings in `<state>/config.json`: `appearance`
-(`system`, `light`, `dark`), `language` (`system` or a code such as `zh-CN`) and `tray`.
+(`system`, `light`, `dark`), `language` (`system` or a code such as `zh-CN`), `tray`,
+`checkUpdates` and `autoUpdate`.
+
+### Updates
+
+The app is the only part that goes online, and only for this. A few seconds after it starts and
+then once a day it asks GitHub's API for the latest release. When there is a newer one:
+
+1. It downloads the archive for this system (`CC-Same-<version>-<platform>`) into
+   `<state>/updates` and checks its size and SHA-256 against the digest GitHub recorded at upload.
+2. It unpacks the archive and starts the new program with `--version`, which must answer with
+   the expected version. On macOS the new bundle must also pass `codesign --verify --deep --strict`
+   and be signed by the same team as the running copy (a copy without a team, built locally,
+   accepts only what Gatekeeper accepts).
+3. It swaps the new copy in: on macOS by renaming the bundle, on Windows by renaming the running
+   program aside (Windows allows that, not overwriting it), on Linux by replacing
+   `bin/cc-same-app`, and `bin/cc-same` next to it. Without permission to write there, it offers
+   the download page instead.
+4. It starts the new copy with `--after-update <pid>` and quits; the new copy waits for the old
+   one to exit, then removes what is left of it.
+
+With *Install updates automatically* on (the default), step 3 waits until the window is closed or
+the app quits; otherwise **Update** does it all at once. A development build does not update
+itself. The background agent is a copy of the app from when it was switched on, so after an
+update the app replaces it with the new version the next time it starts. *What's new* shows the
+release notes, from [CHANGELOG.md](../CHANGELOG.md).
 
 ## Transcripts
 

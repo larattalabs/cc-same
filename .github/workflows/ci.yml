@@ -36,11 +36,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - name: The app and the CLI have the same version
+      - name: The app and the CLI have the same version, and the changelog covers it
         if: runner.os == 'Linux'
         run: |
           v() { sed -n 's/^version = "\(.*\)"/\1/p' "$1" | head -1; }
           test "$(v Cargo.toml)" = "$(v crates/app/Cargo.toml)"
+          grep -q "^## $(v Cargo.toml) " CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $(v Cargo.toml)"; exit 1; }
 
   msrv:
     name: CLI on Rust 1.85
