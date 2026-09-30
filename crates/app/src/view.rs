@@ -227,6 +227,50 @@ impl UniApp {
         });
     }
 
+    /// Ask before switching Claude to `account`, as the menu bar does: a menu item is easy to hit
+    /// by mistake, and switching restarts Claude. An account whose sign-in is kept switches; one
+    /// without restarts Claude on its sign-in page instead, as its "Sign in" button does.
+    pub fn confirm_switch(&mut self, account: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (saved, name, has_email, current) = {
+            let store = self.store.read(cx);
+            let Some(overview) = store.overview.as_ref() else { return };
+            if store.busy.is_some() || overview.logins.signed_in.as_deref() == Some(account.as_str()) {
+                return;
+            }
+            let saved = overview.logins.saved(&account).cloned();
+            let has_email = store.accounts().iter().find(|a| a.id == account).map(|a| a.has_email);
+            let has_email = has_email.unwrap_or_else(|| saved.as_ref().is_some_and(|s| s.email.is_some()));
+            let current = overview.logins.signed_in.as_ref().map(|id| store.account_name(id));
+            (saved, store.account_name(&account), has_email, current)
+        };
+        let Some(saved) = saved else {
+            return self.confirm_sign_in(has_email.then_some(name), window, cx);
+        };
+        let store = self.store.clone();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let muted = cx.theme().muted_foreground;
+            let description = v_flex()
+                .gap_2()
+                .child(tf("switch.confirm_body", &[("account", &name)]))
+                .when_some(current.as_ref(), |el, current| el.child(tf("signin.keeps", &[("account", current)])))
+                .when(saved.stale(), |el| {
+                    el.child(div().pt_1().text_size(rems(0.846)).text_color(muted).child(t("account.stale")))
+                });
+            let (store, account) = (store.clone(), account.clone());
+            alert
+                .title(tf("switch.confirm_title", &[("account", &name)]))
+                .description(description)
+                .confirm()
+                .ok_text(t("account.switch"))
+                .cancel_text(t("dialog.cancel"))
+                .on_ok(move |_, _, cx| {
+                    let account = account.clone();
+                    store.update(cx, |store, cx| store.switch_account(account, cx));
+                    true
+                })
+        });
+    }
+
     /// Ask, then delete the sign-in kept for an account.
     fn confirm_forget(&mut self, account: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();

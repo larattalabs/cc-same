@@ -56,6 +56,10 @@ mod mac {
         SettingsToast,
         /// About to restart Claude to sign in to another account.
         SignIn,
+        /// Asked from the menu bar: switch Claude to Grace?
+        ConfirmSwitch,
+        /// Asked from the menu bar for the account with no sign-in kept yet.
+        ConfirmSwitchUnsaved,
     }
 
     /// Where switching accounts stands in a scene.
@@ -164,6 +168,13 @@ mod mac {
             Scene { switching: Switching::Pending, ..scene("switch-pending-light", Light, in_sync) },
             Scene { overlay: Overlay::SignIn, ..scene("switch-sign-in-light", Light, in_sync) },
             Scene { language: "zh-CN", overlay: Overlay::SignIn, ..scene("zh-CN-switch-sign-in-dark", Dark, in_sync) },
+            Scene { overlay: Overlay::ConfirmSwitch, ..scene("switch-confirm-light", Light, in_sync) },
+            Scene {
+                language: "zh-CN",
+                overlay: Overlay::ConfirmSwitch,
+                ..scene("zh-CN-switch-confirm-dark", Dark, in_sync)
+            },
+            Scene { overlay: Overlay::ConfirmSwitchUnsaved, ..scene("switch-confirm-unsaved-light", Light, in_sync) },
             Scene {
                 language: "zh-CN",
                 switching: Switching::Pending,
@@ -276,6 +287,8 @@ mod mac {
                     this.confirm_restore(&snapshot, window, cx);
                 }
                 Overlay::SignIn => this.confirm_sign_in(Some("grace@hopper.work".into()), window, cx),
+                Overlay::ConfirmSwitch => this.confirm_switch(GRACE.0.into(), window, cx),
+                Overlay::ConfirmSwitchUnsaved => this.confirm_switch(THIRD.0.into(), window, cx),
                 Overlay::SettingsToast => {
                     this.open_settings(window, cx);
                     let message = i18n::tf("update.up_to_date", &[("version", &update::VERSION)]);

@@ -3,6 +3,15 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Changed
+
+- **Switch Account in the menu bar lists every account, and asks first.** It used to list only the
+  accounts CC Same had kept a sign-in for, so until your first switch it showed just the account in
+  use. Now every account is there. Choosing one asks before Claude restarts, since a menu item is
+  easy to hit by mistake; an account whose sign-in isn't kept yet offers to sign in to it instead.
+
 ## 0.1.5 - 2026-09-30
 
 ### Fixed

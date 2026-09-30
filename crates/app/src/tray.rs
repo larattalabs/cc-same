@@ -52,7 +52,7 @@ pub struct Status {
     pub update_enabled: bool,
     /// Switching accounts is available on this system.
     pub can_switch: bool,
-    /// The account Claude is signed in to, then the ones it can switch to.
+    /// The account Claude is signed in to, then every other account CC Same knows.
     pub accounts: Vec<TrayAccount>,
     pub switch_label: String,
     pub sign_in_label: String,
@@ -70,16 +70,14 @@ impl Status {
             (_, None) => (t("app.check_updates"), true),
         };
         let logins = store.overview.as_ref().map(|o| o.logins.clone()).unwrap_or_default();
-        let accounts = logins
-            .signed_in
-            .iter()
-            .map(|id| TrayAccount { id: id.clone(), name: store.account_name(id), current: true })
-            .chain(logins.saved.iter().map(|s| TrayAccount {
-                id: s.account.clone(),
-                name: store.account_name(&s.account),
-                current: false,
-            }))
-            .collect();
+        // Every account, not only the ones with a sign-in kept: choosing one without asks to sign in.
+        let signed_in = logins.signed_in.as_ref().map(|id| (id.clone(), store.account_name(id)));
+        let others = store
+            .accounts()
+            .into_iter()
+            .map(|a| (a.id, a.name))
+            .chain(logins.saved.iter().map(|s| (s.account.clone(), store.account_name(&s.account))));
+        let accounts = tray_accounts(signed_in, others);
         Status {
             title: mood.title(),
             detail: mood.detail(),
@@ -104,6 +102,21 @@ impl Status {
     fn tooltip(&self) -> String {
         format!("{} — {}", crate::APP_NAME, self.title)
     }
+}
+
+/// The accounts menu: the one Claude is signed in to first, then the others, each once.
+fn tray_accounts(
+    signed_in: Option<(String, String)>,
+    others: impl IntoIterator<Item = (String, String)>,
+) -> Vec<TrayAccount> {
+    let mut list: Vec<TrayAccount> =
+        signed_in.into_iter().map(|(id, name)| TrayAccount { id, name, current: true }).collect();
+    for (id, name) in others {
+        if !list.iter().any(|a| a.id == id) {
+            list.push(TrayAccount { id, name, current: false });
+        }
+    }
+    list
 }
 
 /// The icon; dropping it removes it.
@@ -516,5 +529,31 @@ mod platform {
         }
 
         pub fn update(&self, _: &Status) {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(id: &str, name: &str) -> (String, String) {
+        (id.into(), name.into())
+    }
+
+    #[test]
+    fn every_account_is_listed_once_with_claudes_first() {
+        let list = tray_accounts(
+            Some(pair("b", "bob@example.com")),
+            [
+                pair("a", "ada@example.com"),
+                pair("b", "bob@example.com"),
+                pair("c", "Account 0c0c0c0c"),
+                pair("a", "ada@example.com"),
+            ],
+        );
+        let shown: Vec<_> = list.iter().map(|a| (a.id.as_str(), a.current)).collect();
+        assert_eq!(shown, [("b", true), ("a", false), ("c", false)]);
+        // Signed out: nobody is current.
+        assert!(tray_accounts(None, [pair("a", "ada@example.com")]).iter().all(|a| !a.current));
     }
 }

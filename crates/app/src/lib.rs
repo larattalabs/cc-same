@@ -21,8 +21,8 @@ use crate::tray::{Command, Tray};
 use cc_same_core::{Config, Ctx, FakeDesktop, LogSink, Paths};
 use gpui_kit::component::TitleBar;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Entity, Global, KeyBinding, Menu, MenuItem, QuitMode, Subscription, TitlebarOptions,
-    WindowBounds, WindowOptions, actions, px, size,
+    App, AppContext as _, Bounds, Context, Entity, Global, KeyBinding, Menu, MenuItem, QuitMode, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, px, size,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -209,24 +209,30 @@ fn on_tray(command: Command, cx: &mut App) {
             show_window(cx);
             store.update(cx, |s, cx| s.update_or_check(cx));
         }
-        Command::SwitchTo(account) => store.update(cx, |s, cx| s.switch_account(account, cx)),
-        Command::SignInAnother => {
-            // The window explains first: Claude restarts signed out.
-            show_window(cx);
-            cx.defer(|cx| {
-                for handle in cx.windows() {
-                    let _ = handle.update(cx, |root, window, cx| {
-                        if let Ok(root) = root.downcast::<gpui_kit::component::Root>()
-                            && let Ok(view) = root.read(cx).view().clone().downcast::<view::UniApp>()
-                        {
-                            view.update(cx, |view, cx| view.confirm_sign_in(None, window, cx));
-                        }
-                    });
+        // A menu item is easy to hit by mistake, and switching restarts Claude: the window asks first.
+        Command::SwitchTo(account) => in_window(cx, move |view, window, cx| view.confirm_switch(account, window, cx)),
+        // The window explains first: Claude restarts signed out.
+        Command::SignInAnother => in_window(cx, |view, window, cx| view.confirm_sign_in(None, window, cx)),
+        Command::Quit => quit(cx),
+    }
+}
+
+/// Bring the window forward, then hand its view `act` once it is up (a cycle later).
+fn in_window(cx: &mut App, act: impl FnOnce(&mut view::UniApp, &mut Window, &mut Context<view::UniApp>) + 'static) {
+    show_window(cx);
+    cx.defer(move |cx| {
+        let mut act = Some(act);
+        for handle in cx.windows() {
+            let _ = handle.update(cx, |root, window, cx| {
+                if let Ok(root) = root.downcast::<gpui_kit::component::Root>()
+                    && let Ok(view) = root.read(cx).view().clone().downcast::<view::UniApp>()
+                    && let Some(act) = act.take()
+                {
+                    view.update(cx, |view, cx| act(view, window, cx));
                 }
             });
         }
-        Command::Quit => quit(cx),
-    }
+    });
 }
 
 /// Quit, putting a downloaded update in place on the way out when updates install by themselves.
