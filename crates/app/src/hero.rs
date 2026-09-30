@@ -47,7 +47,7 @@ struct Ring {
 impl Ring {
     fn from_account(a: &Account) -> Ring {
         Ring {
-            key: a.key.clone().into(),
+            key: a.id.clone().into(),
             initials: a.initials().into(),
             tip: format!("{}\n{}", a.name, a.detail()).into(),
             placement: a.ring(),

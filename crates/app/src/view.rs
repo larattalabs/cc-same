@@ -124,7 +124,7 @@ impl UniApp {
     }
 
     /// What sits at the end of an account's row: where Claude stands with it, or what one click
-    /// does. An account with several organizations offers it on its first row only.
+    /// does.
     fn account_action(&self, a: &Account, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (busy, switching_to, signing_in) = {
             let store = self.store.read(cx);
@@ -144,9 +144,6 @@ impl UniApp {
         if a.login == Login::SignedIn {
             return Some(tag(t("account.signed_in"), None));
         }
-        if !a.first_of_account {
-            return None;
-        }
         if switching_to.as_deref() == Some(a.id.as_str()) {
             let muted = theme.muted_foreground;
             return Some(
@@ -162,7 +159,7 @@ impl UniApp {
         let id = a.id.clone();
         match a.login {
             Login::Saved { stale } => Some(
-                Button::new(SharedString::from(format!("switch-{}", a.key)))
+                Button::new(SharedString::from(format!("switch-{}", a.id)))
                     .small()
                     .outline()
                     .label(t("account.switch"))
@@ -180,7 +177,7 @@ impl UniApp {
                 // Named in the dialog only by an email address, something people can type.
                 let name = a.has_email.then(|| a.name.clone());
                 Some(
-                    Button::new(SharedString::from(format!("sign-in-{}", a.key)))
+                    Button::new(SharedString::from(format!("sign-in-{}", a.id)))
                         .small()
                         .ghost()
                         .label(t("account.sign_in"))
@@ -477,11 +474,11 @@ impl UniApp {
                 .iter()
                 .zip(actions)
                 .map(|(a, action)| {
-                    let key: SharedString = a.key.clone().into();
+                    let key: SharedString = a.id.clone().into();
                     let hovered = self.hovered.as_ref() == Some(&key);
                     let hover_key = key.clone();
                     let row = h_flex()
-                        .id(ElementId::Name(format!("account-{}", a.key).into()))
+                        .id(ElementId::Name(format!("account-{}", a.id).into()))
                         .gap_3()
                         .px_3()
                         .py_2()
@@ -510,7 +507,7 @@ impl UniApp {
                         )
                         .children(action);
                     // A sign-in kept for switching can be let go of from the row's menu.
-                    if !(matches!(a.login, Login::Saved { .. }) && a.first_of_account) {
+                    if !matches!(a.login, Login::Saved { .. }) {
                         return row.into_any_element();
                     }
                     let view = cx.entity().downgrade();

@@ -121,6 +121,8 @@ mod mac {
             scene("pending-dark", Dark, pending),
             Scene { busy: Some(Busy::Syncing), ..scene("syncing-light", Light, pending) },
             scene("waiting-light", Light, waiting),
+            scene("two-orgs-light", Light, two_orgs),
+            Scene { language: "zh-CN", ..scene("zh-CN-two-orgs-dark", Dark, two_orgs) },
             scene("restart-light", Light, restart),
             scene("restart-dark", Dark, restart),
             scene("linked-light", Light, linked),
@@ -354,8 +356,13 @@ mod mac {
         }
 
         fn sessions(&self, p: (&str, &str), count: usize, mtime_ms: u64) {
+            self.sessions_from(p, 0, count, mtime_ms)
+        }
+
+        /// Sessions numbered `from..from + count`, so two lists can hold different ones.
+        fn sessions_from(&self, p: (&str, &str), from: usize, count: usize, mtime_ms: u64) {
             let dir = self.part(p);
-            for i in 0..count {
+            for i in from..from + count {
                 let u = format!("{:08x}-1111-4222-8333-{:012x}", i, i);
                 let cli = format!("cli-{i:04}");
                 fs::write(self.root.join("projects").join("-Users-ada-code-app").join(format!("{cli}.jsonl")), "{}\n")
@@ -427,6 +434,19 @@ mod mac {
         s.sessions(ADA, 212, 1_790_000_000_000);
         s.sessions(GRACE, 212, 1_790_000_000_000);
         s.sessions(THIRD, 7, 1_790_000_000_000);
+        let mut ov = s.overview();
+        ov.service = ServiceStatus { detail: "not installed".into(), running: Some(false), ..Default::default() };
+        ov.heartbeat = None;
+        Some(ov)
+    }
+
+    /// Two accounts, each with a list in both organizations, the one in the other's organization
+    /// empty: what signing in to one account after the other can leave behind.
+    fn two_orgs(s: &Sample) -> Option<Overview> {
+        s.sessions_from(ADA, 0, 95, 1_790_000_000_000);
+        s.sessions_from(GRACE, 95, 106, 1_790_000_000_000);
+        s.part((ADA.0, GRACE.1));
+        s.part((GRACE.0, ADA.1));
         let mut ov = s.overview();
         ov.service = ServiceStatus { detail: "not installed".into(), running: Some(false), ..Default::default() };
         ov.heartbeat = None;

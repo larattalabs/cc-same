@@ -6,6 +6,9 @@
 //! * `config.json`: `lastKnownAccountUuid`
 //!
 //! When Desktop runs but neither signal is readable, every index counts as loaded.
+//!
+//! What we tell people is open is narrower: the account Desktop signed in to last, with the
+//! organization from the log only when the newest line is about that account.
 
 use crate::ctx::{Ctx, LogScan};
 use crate::fsx;
@@ -18,42 +21,59 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const INIT_MARKER: &str = "[LocalSessionManager] Initialization succeeded";
-const TAIL_BYTES: u64 = 4 * 1024 * 1024;
+/// How much of a log to read the first time: all of it, as Desktop starts a new `main.log` at
+/// about 10 MB. A shorter tail can miss the line of the account in use after a few days, and
+/// fall back to an older file's line about another account.
+const TAIL_BYTES: u64 = 12 * 1024 * 1024;
 
 pub fn detect(ctx: &Ctx) -> AppState {
     let running = is_running(ctx);
     let mut accounts = BTreeSet::new();
     let mut pairs = BTreeSet::new();
     let mut sources = Vec::new();
+    // What Desktop shows, for telling people: an account, and its organization when known.
+    let mut open: Option<(String, Option<String>)> = None;
     if let Some(active) = &ctx.fake.active {
         for item in active {
-            match item.split_once('/') {
-                Some((a, o)) => {
-                    pairs.insert((a.to_string(), o.to_string()));
-                    accounts.insert(a.to_string());
-                }
-                None => {
-                    accounts.insert(item.clone());
-                }
+            let (acct, org) = match item.split_once('/') {
+                Some((a, o)) => (a.to_string(), Some(o.to_string())),
+                None => (item.clone(), None),
+            };
+            if let Some(org) = &org {
+                pairs.insert((acct.clone(), org.clone()));
             }
+            accounts.insert(acct.clone());
+            open.get_or_insert((acct, org));
         }
         sources.push("override");
     }
     let mut init_marker = None;
     if ctx.fake.active.is_none() {
         if let Some(acct) = last_known_account(ctx) {
-            accounts.insert(acct);
+            accounts.insert(acct.clone());
+            open = Some((acct, None));
             sources.push("config.json");
         }
     }
     if let Some(init) = last_init(ctx) {
         init_marker = Some(init.marker);
         if ctx.fake.active.is_none() {
+            // The newest line can predate the last sign-in (it may sit in an older log file), so
+            // it only names the organization of the account signed in to.
+            match &mut open {
+                Some((acct, org)) if *acct == init.acct => *org = Some(init.org.clone()),
+                Some(_) => {}
+                None => open = Some((init.acct.clone(), Some(init.org.clone()))),
+            }
             accounts.insert(init.acct.clone());
             pairs.insert((init.acct, init.org));
             sources.push("Desktop log");
         }
     }
+    let (open_account, open_org) = match open.filter(|_| running) {
+        Some((acct, org)) => (Some(acct), org),
+        None => (None, None),
+    };
     // Keep a just-left account read-only for a moment: Desktop flushes it after switching.
     let grace = Duration::from_secs_f64(ctx.config().switch_grace_seconds.max(0.0));
     let mut recent = ctx.caches.recent_accounts.lock().unwrap();
@@ -71,6 +91,8 @@ pub fn detect(ctx: &Ctx) -> AppState {
         pairs,
         source: if sources.is_empty() { "unknown".into() } else { sources.join(" + ") },
         init_marker,
+        open_account,
+        open_org,
     }
 }
 

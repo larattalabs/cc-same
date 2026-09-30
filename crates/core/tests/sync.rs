@@ -4,7 +4,7 @@
 use cc_same_core::apply::{apply_plan, run_sync};
 use cc_same_core::plan::build_plan;
 use cc_same_core::watch::{self, WatchOptions};
-use cc_same_core::{fsx, snapshot, Config, Ctx, FakeDesktop, LogSink, Paths, Plan, State, Surface};
+use cc_same_core::{desktop, fsx, snapshot, Config, Ctx, FakeDesktop, LogSink, Partition, Paths, Plan, State, Surface};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -609,6 +609,64 @@ fn activate(e: &Env, p: (&str, &str)) {
     )
     .unwrap();
     fs::write(e.user_data.join("config.json"), json!({"lastKnownAccountUuid": p.0}).to_string()).unwrap();
+}
+
+/// What people are told is open: the account Claude signed in to last, with the organization
+/// its log names for that account. Writing stays as careful as before.
+#[test]
+fn the_open_account_is_the_one_signed_in_to() {
+    let e = Env::new();
+    let list = |p: (&str, &str)| Partition {
+        surface: Surface::Code,
+        acct: p.0.into(),
+        org: p.1.into(),
+        path: e.code(p),
+        is_link: false,
+    };
+    let running = |on: bool| {
+        Ctx::new(e.paths(), Config::default(), FakeDesktop { running: Some(on), active: None }, LogSink::Silent)
+    };
+    activate(&e, A);
+    let app = desktop::detect(&running(true));
+    assert_eq!((app.open_account.as_deref(), app.open_org.as_deref()), (Some(A.0), Some(A.1)));
+    assert!(app.showing(&list(A)) && !app.showing(&list((A.0, B.1))) && !app.showing(&list(B)));
+    // Signed in to B since, and the newest log line is still about A (an older log file, say):
+    // B is open, in an organization we cannot name; both wait to be written.
+    fs::write(e.user_data.join("config.json"), json!({"lastKnownAccountUuid": B.0}).to_string()).unwrap();
+    let app = desktop::detect(&running(true));
+    assert_eq!((app.open_account.as_deref(), app.open_org.as_deref()), (Some(B.0), None));
+    assert!(app.showing(&list(B)) && app.showing(&list((B.0, A.1))) && !app.showing(&list(A)));
+    assert!(app.loaded(&list(A)) && app.loaded(&list(B)));
+    // Closed: nothing is open.
+    let app = desktop::detect(&running(false));
+    assert_eq!((app.open_account, app.open_org), (None, None));
+}
+
+/// After days of running, the line about the account in use sits far back in `main.log`. It
+/// still wins over an older log file's line about another account.
+#[test]
+fn a_line_far_back_in_the_log_still_counts() {
+    use std::io::Write;
+    let e = Env::new();
+    let line = |p: (&str, &str)| {
+        format!(
+            "2026-09-28 10:00:00 [info] [LocalSessionManager] Initialization succeeded \u{2014} accountId={}, orgId={}, existingSessions=0\n",
+            p.0, p.1
+        )
+    };
+    let older = e.logs.join("main1.log");
+    fs::write(&older, line(B)).unwrap();
+    set_mtime(&older, 1_000_000);
+    let mut log = fs::File::create(e.logs.join("main.log")).unwrap();
+    log.write_all(line(A).as_bytes()).unwrap();
+    let chatter = "2026-09-28 10:00:01 [info] [other] something else happened\n".repeat(100_000);
+    log.write_all(chatter.as_bytes()).unwrap();
+    assert!(fs::metadata(e.logs.join("main.log")).unwrap().len() > 5 * 1024 * 1024);
+    let ctx =
+        Ctx::new(e.paths(), Config::default(), FakeDesktop { running: Some(true), active: None }, LogSink::Silent);
+    let app = desktop::detect(&ctx);
+    assert_eq!(app.pairs.iter().collect::<Vec<_>>(), [&(A.0.to_string(), A.1.to_string())]);
+    assert_eq!(app.open_account.as_deref(), Some(A.0));
 }
 
 /// Claude runs the whole time; the active account is read the real way, from its config.json

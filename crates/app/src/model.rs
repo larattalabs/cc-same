@@ -4,6 +4,7 @@
 use crate::i18n::{t, tf, tn};
 use cc_same_core::report::{Overview, PartitionView, Warning};
 use cc_same_core::{Surface, short};
+use std::cmp::Reverse;
 use std::time::Duration;
 
 /// How long a pending change may wait for the background agent before we offer "Sync now".
@@ -89,30 +90,26 @@ pub enum Busy {
     Switching,
 }
 
-/// One session list Claude shows: an account in one organization.
+/// An account, the way people know it. Claude keeps a session list for every organization an
+/// account has been used in (signing in to another account can even leave an empty one in the
+/// previous account's organization), and CC Same keeps them all the same, so an account is one
+/// row that reports the list Claude shows for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
-    /// `<account>/<org>`, unique per row.
-    pub key: String,
     pub id: String,
     /// The email, or `Account 1a2b3c4d` when we do not know it.
     pub name: String,
     pub has_email: bool,
-    /// Which organization, when the account has more than one.
-    pub org: Option<String>,
     pub sessions: usize,
     /// Sessions the others have and this one does not, yet.
     pub missing: usize,
-    /// Claude has this one open.
+    /// Claude is signed in to this account and running.
     pub open: bool,
     pub excluded: bool,
-    /// The folder is a link; Claude cannot save here.
+    /// One of its folders is a link; Claude cannot save there.
     pub broken: bool,
     /// Whether Claude can switch to this account.
     pub login: Login,
-    /// The account's first row: an account with several organizations has a row for each, and
-    /// only the first offers to switch.
-    pub first_of_account: bool,
 }
 
 /// Where an account stands for switching Claude to it.
@@ -150,9 +147,6 @@ impl Account {
         if self.missing > 0 {
             parts.push(tf("account.to_copy", &[("count", &self.missing)]));
         }
-        if let Some(org) = &self.org {
-            parts.push(org.clone());
-        }
         parts.join(" · ")
     }
 
@@ -182,10 +176,9 @@ pub enum Placement {
     Broken,
 }
 
-/// One row per Code index (the list Claude shows), labelled with an email when we know it.
+/// One row per account, labelled with an email when we know it.
 pub fn accounts(ov: &Overview) -> Vec<Account> {
     let Some(code) = ov.surface(Surface::Code) else { return Vec::new() };
-    let orgs = |acct: &str| code.partitions.iter().filter(|p| p.part.acct == acct).count();
     let logins = &ov.logins;
     let login = |acct: &str| match logins.saved(acct) {
         _ if !logins.supported => Login::Unsupported,
@@ -193,37 +186,48 @@ pub fn accounts(ov: &Overview) -> Vec<Account> {
         Some(saved) => Login::Saved { stale: saved.stale() },
         None => Login::Unknown,
     };
-    let mut rows: Vec<Account> = code
-        .partitions
-        .iter()
-        .map(|p: &PartitionView| {
-            let email = p.email.clone().or_else(|| logins.saved(&p.part.acct).and_then(|s| s.email.clone()));
-            (p, email)
-        })
-        .map(|(p, email)| Account {
-            key: format!("{}/{}", p.part.acct, p.part.org),
-            id: p.part.acct.clone(),
-            name: email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(&p.part.acct))])),
-            has_email: email.is_some(),
-            org: (orgs(&p.part.acct) > 1).then(|| tf("account.org", &[("id", &short(&p.part.org))])),
-            sessions: p.sessions,
-            missing: if p.excluded { 0 } else { p.missing },
-            open: p.loaded,
-            excluded: p.excluded,
-            broken: p.error.is_some() || p.part.is_link,
-            login: login(&p.part.acct),
-            first_of_account: false,
+    let mut groups: Vec<Vec<&PartitionView>> = Vec::new();
+    for p in &code.partitions {
+        match groups.iter_mut().find(|g| g[0].part.acct == p.part.acct) {
+            Some(group) => group.push(p),
+            None => groups.push(vec![p]),
+        }
+    }
+    let mut rows: Vec<Account> = groups
+        .into_iter()
+        .map(|lists| {
+            let acct = lists[0].part.acct.clone();
+            // The list Claude shows for the account: the one it has open, else the fullest.
+            let shown = lists
+                .iter()
+                .copied()
+                .max_by_key(|p| {
+                    let open = ov.app.showing(&p.part);
+                    (!p.excluded, open, p.sessions, Reverse(p.missing), Reverse(p.part.org.as_str()))
+                })
+                .expect("a group has a list");
+            let email = lists
+                .iter()
+                .find_map(|p| p.email.clone())
+                .or_else(|| logins.saved(&acct).and_then(|s| s.email.clone()));
+            Account {
+                name: email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(&acct))])),
+                has_email: email.is_some(),
+                sessions: shown.sessions,
+                missing: if shown.excluded { 0 } else { shown.missing },
+                open: ov.app.open_account.as_deref() == Some(acct.as_str()),
+                excluded: lists.iter().all(|p| p.excluded),
+                broken: lists.iter().any(|p| p.error.is_some() || p.part.is_link),
+                login: login(&acct),
+                id: acct,
+            }
         })
         .collect();
     // Named accounts first, then the ones we only know by id; excluded ones last.
     rows.sort_by(|a, b| {
-        let key = |r: &Account| (r.excluded, !r.has_email, r.name.to_lowercase(), r.key.clone());
+        let key = |r: &Account| (r.excluded, !r.has_email, r.name.to_lowercase(), r.id.clone());
         key(a).cmp(&key(b))
     });
-    let mut seen = std::collections::HashSet::new();
-    for row in &mut rows {
-        row.first_of_account = seen.insert(row.id.clone());
-    }
     rows
 }
 
@@ -248,7 +252,11 @@ pub fn mood(ov: Option<&Overview>, syncing: bool, pending_for: Option<Duration>)
     }
     let accounts = accounts(ov);
     let taking_part = accounts.iter().filter(|a| !a.excluded && !a.broken).count();
-    if taking_part < 2 {
+    // Two lists are enough to keep in step, even two organizations of one account.
+    let lists = ov.surface(Surface::Code).map_or(0, |code| {
+        code.partitions.iter().filter(|p| !p.excluded && p.error.is_none() && !p.part.is_link).count()
+    });
+    if lists < 2 {
         return Mood::Single;
     }
     let union = ov.surface(Surface::Code).map(|s| s.union).unwrap_or(0);
@@ -316,19 +324,102 @@ mod tests {
 
     fn account(name: &str, has_email: bool) -> Account {
         Account {
-            key: format!("{name}/org"),
             id: "9e31ea7e-0000-0000-0000-000000000000".into(),
             name: name.into(),
             has_email,
-            org: None,
             sessions: 209,
             missing: 0,
             open: false,
             excluded: false,
             broken: false,
             login: Login::Unknown,
-            first_of_account: true,
         }
+    }
+
+    const ADA: &str = "aaaaaaaa-0000-4000-8000-000000000001";
+    const BOB: &str = "bbbbbbbb-0000-4000-8000-000000000002";
+    const ADA_ORG: &str = "0a0a0a0a-0000-4000-8000-000000000001";
+    const BOB_ORG: &str = "0b0b0b0b-0000-4000-8000-000000000002";
+
+    /// As seen on a Windows machine: each account has a list in both organizations, the one in
+    /// the other's organization empty (signing in there reused the organization Claude still
+    /// remembered). Claude runs, signed in to Bob; `open_org` is what its log says.
+    fn two_accounts_in_two_orgs(open_org: Option<&str>) -> Overview {
+        use cc_same_core::report::{PlanView, SurfaceView};
+        use cc_same_core::{AppState, Config, Partition};
+        let list = |acct: &str, org: &str, sessions: usize, missing: usize| PartitionView {
+            part: Partition {
+                surface: Surface::Code,
+                acct: acct.into(),
+                org: org.into(),
+                path: Default::default(),
+                is_link: false,
+            },
+            email: Some(format!("{}@example.com", if acct == ADA { "ada" } else { "bob" })),
+            sessions,
+            archived: 0,
+            markers: 0,
+            missing,
+            unreadable: 0,
+            loaded: true,
+            excluded: false,
+            error: None,
+            collections: Vec::new(),
+            unmanaged: Vec::new(),
+        };
+        let partitions = vec![
+            list(ADA, ADA_ORG, 95, 106),
+            list(ADA, BOB_ORG, 0, 201),
+            list(BOB, ADA_ORG, 0, 201),
+            list(BOB, BOB_ORG, 106, 95),
+        ];
+        Overview {
+            desktop_version: None,
+            app: AppState {
+                running: true,
+                open_account: Some(BOB.into()),
+                open_org: open_org.map(str::to_string),
+                ..AppState::default()
+            },
+            labels: Default::default(),
+            surfaces: vec![SurfaceView { surface: Surface::Code, enabled: true, partitions, union: 201 }],
+            plan: PlanView::default(),
+            warnings: Vec::new(),
+            retention: Default::default(),
+            logins: cc_same_core::logins::Logins { supported: false, signed_in: Some(BOB.into()), saved: Vec::new() },
+            service: Default::default(),
+            heartbeat: None,
+            last_sync: None,
+            baseline: None,
+            pending_restart: None,
+            config: Config::default(),
+        }
+    }
+
+    #[test]
+    fn one_row_per_account() {
+        let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        // Whether or not Claude's log names the organization, only the signed-in account is open,
+        // and each row reports the list that account uses.
+        for open_org in [Some(BOB_ORG), None] {
+            let ov = two_accounts_in_two_orgs(open_org);
+            let rows: Vec<_> = accounts(&ov).into_iter().map(|a| (a.name, a.sessions, a.missing, a.open)).collect();
+            assert_eq!(rows, [("ada@example.com".into(), 95, 106, false), ("bob@example.com".into(), 106, 95, true)]);
+            assert_eq!(mood(Some(&ov), false, None), Mood::InSync { sessions: 201, accounts: 2 });
+        }
+        // The organization Claude has open wins over a fuller list.
+        let mut ov = two_accounts_in_two_orgs(Some(ADA_ORG));
+        ov.app.open_account = Some(BOB.into());
+        assert_eq!(accounts(&ov)[1].sessions, 0);
+        // Claude closed: nothing is open.
+        ov.app.running = false;
+        ov.app.open_account = None;
+        assert!(accounts(&ov).iter().all(|a| !a.open));
+        // One account in two organizations still has two lists to keep in step.
+        let mut ov = two_accounts_in_two_orgs(None);
+        ov.surfaces[0].partitions.retain(|p| p.part.acct == BOB);
+        assert_eq!(mood(Some(&ov), false, None), Mood::InSync { sessions: 201, accounts: 1 });
     }
 
     #[test]

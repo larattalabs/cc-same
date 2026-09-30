@@ -307,6 +307,12 @@ pub struct AppState {
     /// Identifies Desktop's latest session-list load (log file + offset of its init line).
     /// Changes whenever Desktop reloads the list, e.g. after a restart.
     pub init_marker: Option<String>,
+    /// The account Desktop shows while it runs: the one it signed in to last. For telling
+    /// people; what may be written is [`AppState::loaded`]'s call, which also counts a
+    /// just-left account, or every account when unsure.
+    pub open_account: Option<String>,
+    /// That account's organization, when Desktop's log names it.
+    pub open_org: Option<String>,
 }
 
 impl AppState {
@@ -319,6 +325,12 @@ impl AppState {
             return true;
         }
         self.accounts.contains(&p.acct) || self.pairs.contains(&(p.acct.clone(), p.org.clone()))
+    }
+
+    /// Desktop shows this index now, as far as we know (every index of the open account when
+    /// its organization is unknown). For telling people, not for deciding what may be written.
+    pub fn showing(&self, p: &Partition) -> bool {
+        self.open_account.as_deref() == Some(p.acct.as_str()) && self.open_org.as_ref().is_none_or(|o| *o == p.org)
     }
 }
 

@@ -3,6 +3,20 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Fixed
+
+- **An account showed up once per organization**, the same email on two rows, and every row said
+  “Open in Claude”. Claude keeps a session list for each organization an account is used in, and
+  signing in to one account after another can leave an empty list in the other account’s
+  organization. The window now shows each account once, reporting the list Claude shows for it,
+  and marks only the account Claude is signed in to as open. CC Same still keeps every list the
+  same. `cc-same doctor` also names only that account as open.
+- **Updates to an account could wait until Claude restarted** when Claude had been open for a few
+  days. CC Same read only the end of Claude’s log to see which account is in use, and could fall
+  back to an older log’s line about another account. It now reads the whole log.
+
 ## 0.1.4 - 2026-09-30
 
 ### Fixed

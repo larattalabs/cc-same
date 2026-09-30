@@ -19,6 +19,11 @@ Windows (the Store build virtualises it as `%LOCALAPPDATA%\Packages\Claude_*\Loc
 `~/.config/Claude` on Linux. Local Cowork sessions live in the same shape under
 `local-agent-mode-sessions/`, with a folder per session.
 
+An account gets a folder for every organization it is used in. Signing in to another account can
+leave an empty one behind as well: Desktop opens the new account with the organization it
+remembered from the previous one (its `lastActiveOrg`), and moves to the right organization a moment
+later. CC Same keeps every folder the same, and the app shows one row per account.
+
 The conversations themselves are Claude Code transcripts in `~/.claude/projects/<project>/<id>.jsonl`,
 shared by every account. A session record points at its transcript through `cliSessionId`.
 
@@ -52,7 +57,8 @@ Copying between folders that Desktop also writes would race it, except that Desk
 1. It works out which account Desktop has loaded, from the newest
    `[LocalSessionManager] Initialization succeeded — accountId=…, orgId=…` line in Desktop's
    `main.log`, and `lastKnownAccountUuid` in its `config.json`. If Desktop is running but neither
-   can be read, every index counts as loaded.
+   can be read, every index counts as loaded. What the app calls open is narrower: the account
+   in `lastKnownAccountUuid`, since the newest log line can predate the last sign-in.
 2. It never modifies an index Desktop has loaded. It copies that index's changes to all the
    others as they happen.
 3. After you switch accounts or quit, the index you left is caught up. A just-left account stays

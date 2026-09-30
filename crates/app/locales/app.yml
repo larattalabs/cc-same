@@ -314,17 +314,6 @@ _version: 2
   es: "%{count} por copiar"
   pt-BR: "%{count} para copiar"
   ru: "%{count} к копированию"
-"account.org":
-  en: "org %{id}"
-  zh-CN: "组织 %{id}"
-  zh-TW: "組織 %{id}"
-  ja: "組織 %{id}"
-  ko: "조직 %{id}"
-  fr: "org. %{id}"
-  de: "Org. %{id}"
-  es: "org. %{id}"
-  pt-BR: "org. %{id}"
-  ru: "орг. %{id}"
 "account.open":
   en: "Open in Claude"
   zh-CN: "Claude 正在使用"

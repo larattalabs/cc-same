@@ -145,7 +145,7 @@ fn body(store: &Entity<Store>, cx: &mut App) -> impl IntoElement {
                     .child(Avatar::new().name(a.initials()).xsmall())
                     .child(div().flex_1().min_w_0().truncate().child(a.name.clone()))
                     .child(
-                        Switch::new(SharedString::from(format!("include-{}", a.key)))
+                        Switch::new(SharedString::from(format!("include-{}", a.id)))
                             .small()
                             .checked(included)
                             .disabled(!idle)

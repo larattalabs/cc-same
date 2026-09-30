@@ -304,11 +304,8 @@ fn doctor(ctx: &Ctx) -> Result<()> {
         (None, true) => "Claude is running".to_string(),
         (None, false) => "Claude is not running".to_string(),
     };
-    let open: Vec<String> = ov.app.accounts.iter().map(|a| email_or_id(&ov, a)).collect();
-    println!(
-        "{desktop}{}",
-        if ov.app.running && !open.is_empty() { format!("; open account: {}", open.join(", ")) } else { String::new() }
-    );
+    let open = ov.app.open_account.as_deref().map(|a| format!("; open account: {}", email_or_id(&ov, a)));
+    println!("{desktop}{}", open.unwrap_or_default());
     println!("Background sync: {}", service_line(&ov));
     for sv in &ov.surfaces {
         println!();
@@ -320,7 +317,7 @@ fn doctor(ctx: &Ctx) -> Result<()> {
         }
         for pv in &sv.partitions {
             let mut flags = Vec::new();
-            if pv.loaded {
+            if ov.app.showing(&pv.part) {
                 flags.push("OPEN IN CLAUDE");
             }
             if pv.excluded {
