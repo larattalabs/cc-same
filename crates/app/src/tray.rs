@@ -91,7 +91,9 @@ impl Status {
             settings: t("app.settings"),
             update,
             update_enabled,
-            can_switch: logins.supported,
+            // Decided by the system, not by the overview: the menu is built at launch, before the
+            // first overview arrives, and the submenu is only ever added then.
+            can_switch: cc_same_core::logins::supported(),
             accounts,
             switch_label: t("tray.switch_account"),
             sign_in_label: t("tray.sign_in_another"),
@@ -555,5 +557,23 @@ mod tests {
         assert_eq!(shown, [("b", true), ("a", false), ("c", false)]);
         // Signed out: nobody is current.
         assert!(tray_accounts(None, [pair("a", "ada@example.com")]).iter().all(|a| !a.current));
+    }
+
+    /// The menu is built once, at launch, before the accounts have been read: Switch Account must
+    /// be there from the start, or it never appears.
+    #[test]
+    fn switch_account_is_offered_before_the_accounts_load() {
+        use cc_same_core::{Config, Ctx, FakeDesktop, LogSink, Paths};
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().join("Claude"), tmp.path().join("state"));
+        let ctx = Arc::new(Ctx::new(paths, Config::default(), FakeDesktop::default(), LogSink::Silent));
+        let mut cx = gpui_kit::HeadlessAppContext::new(Arc::new(gpui_kit::NoopTextSystem::new()));
+        let status = cx.update(|cx| {
+            let store = Store::preview(ctx, None, Vec::new(), None, cx);
+            Status::of(store.read(cx))
+        });
+        assert_eq!(status.can_switch, cc_same_core::logins::supported(), "decided before the first overview");
+        assert!(status.accounts.is_empty() && !status.can_sync);
     }
 }

@@ -3,6 +3,15 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Fixed
+
+- **Switch Account was missing from the menu bar.** The menu is built when the app starts, before
+  it has read your accounts, and it added Switch Account only if it already knew then that switching
+  works here, so it never did. On macOS it is now always there; the accounts fill in once they are
+  read.
+
 ## 0.1.6 - 2026-09-30
 
 ### Changed
