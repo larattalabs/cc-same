@@ -3,6 +3,17 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Fixed
+
+- **A cleared conversation could come back.** If you cleared a conversation and didn't write in
+  it again, say you cleared it and then archived it, CC Same mistook the cleared session for a
+  damaged one and kept the copy from before the clear. Your other accounts kept the old
+  conversation, the window said an update would land when you switch accounts or quit Claude, and
+  that update gave the account you had cleared it in the old conversation back too, unarchived if
+  you had archived it. A cleared conversation now reaches every account like any other change.
+
 ## 0.1.7 - 2026-09-30
 
 ### Fixed

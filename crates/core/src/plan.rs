@@ -46,7 +46,7 @@ pub fn build_plan(
 
 /// The newest copy wins; ties go to the greatest partition key so every run agrees. If the
 /// newest copy lost its transcript link while an older one still points at a transcript on
-/// disk, the older one wins.
+/// disk, the older one wins, unless the newest copy left that transcript behind on purpose.
 fn choose_winner<'a>(
     members: &[&'a PartState],
     cands: &[(usize, &'a Record)],
@@ -66,16 +66,26 @@ fn choose_winner<'a>(
     if transcripts.is_none() || healthy(top.1) {
         return (top.0, top.1, None);
     }
-    for &c in &ordered[1..] {
-        if healthy(c.1) {
-            let why = format!(
-                "newest copy of {} lost its transcript link; kept the newest copy whose transcript is on disk",
-                top.1.uuid
-            );
-            return (c.0, c.1, Some(why));
-        }
+    let Some(&(i, healthy_copy)) = ordered[1..].iter().find(|c| healthy(c.1)) else {
+        return (top.0, top.1, None);
+    };
+    let cid = healthy_copy.data.as_deref().unwrap().get("cliSessionId").and_then(Value::as_str);
+    if cid.is_some_and(|cid| left_behind(top.1.data.as_deref().unwrap()).contains(cid)) {
+        return (top.0, top.1, None);
     }
-    (top.0, top.1, None)
+    let why = format!(
+        "newest copy of {} lost its transcript link; kept the newest copy whose transcript is on disk",
+        top.1.uuid
+    );
+    (i, healthy_copy, Some(why))
+}
+
+/// Transcripts a session moved off on purpose: Desktop lists the old one in `priorCliSessionIds`
+/// when a conversation is cleared or rewound (clearing can also keep it in
+/// `preClearCliSessionId`). A transcript it could not resume is dropped without a trace.
+fn left_behind(d: &Json) -> BTreeSet<&str> {
+    let prior = d.get("priorCliSessionIds").and_then(Value::as_array).into_iter().flatten();
+    prior.chain(d.get("preClearCliSessionId")).filter_map(Value::as_str).collect()
 }
 
 struct Planner<'a> {

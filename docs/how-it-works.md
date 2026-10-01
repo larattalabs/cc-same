@@ -77,7 +77,10 @@ For every session:
   looks newer than what it was copied from, and nothing ping-pongs.
 - **Healthy beats damaged.** If the newest copy lost its transcript link (`cliSessionId` gone or
   `transcriptUnavailable`) while an older copy points at a transcript that is still on disk, the
-  older copy wins.
+  older copy wins. Clearing or rewinding a conversation is not damage: Desktop first lists the
+  transcript it moves off in `priorCliSessionIds` (clearing can also keep it in
+  `preClearCliSessionId`), so a newest copy that left the older copy's transcript behind still
+  wins. A transcript Desktop could not resume is dropped without that trace.
 - **Deletions.** A `deleted_<session id>` marker newer than the session's newest copy means the
   session was deleted after its last change. It is moved to the trash everywhere, and the markers
   are copied everywhere, which also stops Desktop's importer from offering the session again. A

@@ -447,13 +447,40 @@ fn damaged_newest_copy_loses_to_a_healthy_copy_with_transcript() {
     let e = Env::new();
     let x = uid();
     fs::write(e.projects.join("-tmp-proj").join("cli-good.jsonl"), "{}\n").unwrap();
-    e.record(A, &x, 300_000, json!({"cliSessionId": null, "transcriptUnavailable": true, "title": "damaged"}));
+    // It remembers an earlier transcript, not the one the healthy copy points at.
+    let damaged = json!({
+        "cliSessionId": null, "transcriptUnavailable": true, "priorCliSessionIds": ["cli-earlier"], "title": "damaged",
+    });
+    e.record(A, &x, 300_000, damaged);
     e.record(B, &x, 200_000, json!({"cliSessionId": "cli-good", "title": "healthy"}));
     let plan = e.plan(&e.ctx());
     assert!(plan.notes.iter().any(|n| n.contains("transcript")));
     e.sync();
     assert_eq!(e.read(A, &x)["cliSessionId"], "cli-good");
     assert!(e.read(A, &x).get("transcriptUnavailable").is_none());
+}
+
+#[test]
+fn a_cleared_conversation_is_not_a_lost_transcript() {
+    let e = Env::new();
+    let x = uid();
+    fs::write(e.projects.join("-tmp-proj").join("cli-old.jsonl"), "{}\n").unwrap();
+    e.record(A, &x, 100_000, json!({"cliSessionId": "cli-old"}));
+    e.code(B);
+    e.sync();
+    // Cleared, then archived, in the account Claude has open. Desktop lists the transcript it
+    // left in priorCliSessionIds before dropping cliSessionId.
+    e.record(A, &x, 200_000, json!({"cliSessionId": null, "priorCliSessionIds": ["cli-old"], "isArchived": true}));
+    let running = e.ctx_with(true, Some(vec![key(A)]));
+    let plan = e.plan(&running);
+    assert_eq!(plan.deferred_total(), 0);
+    assert!(!plan.notes.iter().any(|n| n.contains("transcript")));
+    e.sync_with(&running);
+    assert!(e.read(B, &x)["cliSessionId"].is_null());
+    assert_eq!(e.read(B, &x)["isArchived"], true);
+    e.sync(); // Claude quit
+    assert!(e.read(A, &x)["cliSessionId"].is_null());
+    assert_eq!(e.read(A, &x)["isArchived"], true);
 }
 
 #[test]
