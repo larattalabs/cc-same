@@ -29,7 +29,7 @@ pub struct Slot {
     pub alias: Option<String>,
     /// Sits out of the rotation; switching to it by name still works.
     pub disabled: bool,
-    /// When it joined (Unix seconds).
+    /// When it joined (Unix seconds, whole ones: they read back from JSON exactly as written).
     pub added_at: f64,
     /// Organizations Claude was seen using it with, to tell its plan usage apart.
     pub orgs: Vec<String>,
@@ -72,7 +72,7 @@ impl Roster {
     fn join(&mut self, account: &str, email: Option<String>, now: f64) {
         if self.slot(account).is_none() && crate::is_uuid(account) {
             let number = self.next_number();
-            let slot = Slot { number, account: account.into(), email, added_at: now, ..Slot::default() };
+            let slot = Slot { number, account: account.into(), email, added_at: now.trunc(), ..Slot::default() };
             self.slots.push(slot);
         }
     }
