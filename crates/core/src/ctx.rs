@@ -81,6 +81,8 @@ pub(crate) struct LogScan {
     pub found: Option<(String, String)>,
     /// Byte offset of the line `found` came from.
     pub found_at: u64,
+    /// When that line was written (Unix seconds), from its timestamp.
+    pub found_time: Option<f64>,
 }
 
 #[derive(Default)]

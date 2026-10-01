@@ -211,6 +211,7 @@ fn on_tray(command: Command, cx: &mut App) {
         }
         // A menu item is easy to hit by mistake, and switching restarts Claude: the window asks first.
         Command::SwitchTo(account) => in_window(cx, move |view, window, cx| view.confirm_switch(account, window, cx)),
+        Command::SwitchNext => in_window(cx, |view, window, cx| view.confirm_next(window, cx)),
         // The window explains first: Claude restarts signed out.
         Command::SignInAnother => in_window(cx, |view, window, cx| view.confirm_sign_in(None, window, cx)),
         Command::Quit => quit(cx),

@@ -20,15 +20,18 @@ fn main() -> anyhow::Result<()> {
 mod mac {
     use cc_same_app::i18n;
     use cc_same_app::model::Busy;
-    use cc_same_app::store::{SigningIn, Store, UpdatePhase, Updates};
+    use cc_same_app::store::{SigningIn, Store, UpdatePhase, Updates, Waiting};
     use cc_same_app::theme::{self, ThemeChoice};
     use cc_same_app::update::{self, Asset, Problem, Release};
     use cc_same_app::view::UniApp;
+    use cc_same_core::accounts::{Roster, Slot};
     use cc_same_core::config::{LastSync, PendingRestart};
+    use cc_same_core::desktop::Quitting;
     use cc_same_core::logins::{Logins, Saved};
     use cc_same_core::report::{self, Overview};
     use cc_same_core::service::{Heartbeat, ServiceStatus};
     use cc_same_core::snapshot::{Manifest, SnapshotPart};
+    use cc_same_core::usage::Usage;
     use cc_same_core::{Config, Ctx, FakeDesktop, LogSink, Paths, Surface, apply, fsx};
     use gpui_kit::base::Root;
     use gpui_kit::{AppContext as _, Entity, HeadlessAppContext, px, size};
@@ -60,6 +63,10 @@ mod mac {
         ConfirmSwitch,
         /// Asked from the menu bar for the account with no sign-in kept yet.
         ConfirmSwitchUnsaved,
+        /// About to take Grace off the list.
+        ConfirmRemove,
+        /// "Next Account" from the menu bar.
+        ConfirmNext,
     }
 
     /// Where switching accounts stands in a scene.
@@ -72,6 +79,10 @@ mod mac {
         Restarting,
         /// Claude waits for a sign-in to the third account.
         Pending,
+        /// On the way to Grace, Claude asks whether to stop its work in progress.
+        Confirming,
+        /// On the way to Grace, Claude waits for its work to finish before it quits.
+        AfterWork,
     }
 
     /// Where an update stands in a scene.
@@ -166,6 +177,22 @@ mod mac {
                 ..scene("switch-restarting-dark", Dark, in_sync)
             },
             Scene { switching: Switching::Pending, ..scene("switch-pending-light", Light, in_sync) },
+            Scene {
+                busy: Some(Busy::Switching),
+                switching: Switching::Confirming,
+                ..scene("switch-confirming-light", Light, in_sync)
+            },
+            Scene {
+                busy: Some(Busy::Switching),
+                switching: Switching::AfterWork,
+                ..scene("switch-after-work-dark", Dark, in_sync)
+            },
+            Scene {
+                language: "zh-CN",
+                busy: Some(Busy::Switching),
+                switching: Switching::Confirming,
+                ..scene("zh-CN-switch-confirming-dark", Dark, in_sync)
+            },
             Scene { overlay: Overlay::SignIn, ..scene("switch-sign-in-light", Light, in_sync) },
             Scene { language: "zh-CN", overlay: Overlay::SignIn, ..scene("zh-CN-switch-sign-in-dark", Dark, in_sync) },
             Scene { overlay: Overlay::ConfirmSwitch, ..scene("switch-confirm-light", Light, in_sync) },
@@ -175,6 +202,16 @@ mod mac {
                 ..scene("zh-CN-switch-confirm-dark", Dark, in_sync)
             },
             Scene { overlay: Overlay::ConfirmSwitchUnsaved, ..scene("switch-confirm-unsaved-light", Light, in_sync) },
+            Scene { overlay: Overlay::ConfirmRemove, ..scene("remove-confirm-light", Light, in_sync) },
+            Scene { overlay: Overlay::ConfirmNext, ..scene("next-confirm-dark", Dark, in_sync) },
+            Scene { overlay: Overlay::Settings, tall: true, ..scene("settings-tall-light", Light, in_sync) },
+            Scene {
+                language: "zh-CN",
+                overlay: Overlay::Settings,
+                tall: true,
+                ..scene("zh-CN-settings-tall-dark", Dark, in_sync)
+            },
+            Scene { language: "zh-CN", ..scene("zh-CN-in-sync-light", Light, in_sync) },
             Scene {
                 language: "zh-CN",
                 switching: Switching::Pending,
@@ -263,6 +300,14 @@ mod mac {
                 match switching {
                     Switching::Idle | Switching::Restarting => {}
                     Switching::ToGrace => store.switching_to = Some(GRACE.0.into()),
+                    Switching::Confirming | Switching::AfterWork => {
+                        store.switching_to = Some(GRACE.0.into());
+                        let quitting = match switching {
+                            Switching::Confirming => Quitting::Confirming,
+                            _ => Quitting::AfterWork,
+                        };
+                        store.waiting = Some(Arc::new(Waiting::new(quitting)));
+                    }
                     Switching::Pending => {
                         let expected = None;
                         store.signing_in = Some(SigningIn { previous: Some(ADA.0.into()), expected });
@@ -289,6 +334,8 @@ mod mac {
                 Overlay::SignIn => this.confirm_sign_in(Some("grace@hopper.work".into()), window, cx),
                 Overlay::ConfirmSwitch => this.confirm_switch(GRACE.0.into(), window, cx),
                 Overlay::ConfirmSwitchUnsaved => this.confirm_switch(THIRD.0.into(), window, cx),
+                Overlay::ConfirmRemove => this.confirm_remove(GRACE.0.into(), "grace@hopper.work".into(), window, cx),
+                Overlay::ConfirmNext => this.confirm_next(window, cx),
                 Overlay::SettingsToast => {
                     this.open_settings(window, cx);
                     let message = i18n::tf("update.up_to_date", &[("version", &update::VERSION)]);
@@ -415,6 +462,25 @@ mod mac {
                     set_aside_at: now - 2.0 * 86_400.0,
                 }],
             };
+            // Ada and Grace are in the list; Ada goes by "work". Claude last read Grace's plan the
+            // day before yesterday, near the end of her week.
+            let slot = |number: u32, p: (&str, &str), email: &str, alias: Option<&str>| Slot {
+                number,
+                account: p.0.into(),
+                email: Some(email.into()),
+                alias: alias.map(str::to_string),
+                orgs: vec![p.1.into()],
+                ..Slot::default()
+            };
+            ov.roster = Roster {
+                version: 1,
+                slots: vec![slot(1, ADA, "ada@lovelace.dev", Some("work")), slot(2, GRACE, "grace@hopper.work", None)],
+            };
+            ov.usage = [
+                (ADA.0.to_string(), Usage { at: now - 120.0, five_hour: Some(12.0), weekly: Some(58.0) }),
+                (GRACE.0.to_string(), Usage { at: now - 31.0 * 3600.0, five_hour: Some(40.0), weekly: Some(92.0) }),
+            ]
+            .into();
             ov.service =
                 ServiceStatus { installed: true, running: Some(true), detail: "running".into(), ..Default::default() };
             ov.heartbeat = Some(Heartbeat {

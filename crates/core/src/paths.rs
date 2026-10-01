@@ -113,6 +113,16 @@ impl Paths {
     pub fn retention_undo_file(&self) -> PathBuf {
         self.state_dir.join("retention-undo.json")
     }
+
+    /// The numbered list of accounts to switch between.
+    pub fn roster_file(&self) -> PathBuf {
+        self.state_dir.join("accounts.json")
+    }
+
+    /// Claude Desktop's record of plan usage, per organization.
+    pub fn usage_history(&self) -> PathBuf {
+        self.user_data.join("plan-usage-history.json")
+    }
 }
 
 /// Claude Code's system directory for managed settings.

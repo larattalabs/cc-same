@@ -18,6 +18,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const INIT_MARKER: &str = "[LocalSessionManager] Initialization succeeded";
@@ -111,6 +112,8 @@ pub enum NotReady {
     StillOpen,
     /// Claude's updater is replacing the app.
     Updating,
+    /// Whoever asked stopped waiting for Claude to quit.
+    Stopped,
 }
 
 impl std::fmt::Display for NotReady {
@@ -118,27 +121,139 @@ impl std::fmt::Display for NotReady {
         f.write_str(match self {
             NotReady::StillOpen => "Claude did not quit, so nothing was changed",
             NotReady::Updating => "Claude is updating; try again in a minute",
+            NotReady::Stopped => "stopped waiting for Claude to quit, so nothing was changed",
         })
     }
 }
 
 impl std::error::Error for NotReady {}
 
-/// Ask Claude to quit, the way the Dock's Quit does, and wait up to `timeout` for it and its
-/// helpers to be gone. Claude may ask first (about running tasks, say); the user answers there.
-pub fn quit(ctx: &Ctx, timeout: Duration) -> anyhow::Result<()> {
+/// How a request to quit is going, as Claude's log tells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quitting {
+    /// Asked; Claude is closing, or has said nothing yet.
+    Asked,
+    /// Claude is asking whether to stop its work in progress ("Claude is still working").
+    Confirming,
+    /// The answer was "Wait for Claude": it quits by itself once that work is done.
+    AfterWork,
+}
+
+/// How whoever asked Claude to quit follows along, and stops waiting.
+#[derive(Default)]
+pub struct Watch<'a> {
+    pub progress: Option<&'a (dyn Fn(Quitting) + Sync)>,
+    pub stop: Option<&'a AtomicBool>,
+}
+
+impl Watch<'_> {
+    fn tell(&self, quitting: Quitting) {
+        if let Some(progress) = self.progress {
+            progress(quitting);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.is_some_and(|s| s.load(Ordering::Relaxed))
+    }
+}
+
+/// How long Claude may keep a "Claude is still working" question open: someone who chose Cancel
+/// there may never stop waiting here.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Ask Claude to quit, the way the Dock's Quit does, and wait for it and its helpers to be gone:
+/// up to `timeout` while it says nothing, up to ten minutes while it asks whether to stop its
+/// work in progress, and for as long as that work takes when the answer was to wait. `watch`
+/// hears how it goes, and can stop waiting.
+pub fn quit(ctx: &Ctx, timeout: Duration, watch: &Watch) -> anyhow::Result<()> {
     if ctx.fake.running.is_some() {
         return Ok(());
     }
+    let mut log = QuitLog::start(&ctx.paths.desktop_logs.join("main.log"));
     process::ask_to_quit();
-    let deadline = Instant::now() + timeout;
-    while process::any_running() {
-        if Instant::now() >= deadline {
+    wait_for_quit(process::any_running, &mut log, (timeout, CONFIRM_TIMEOUT), watch)
+}
+
+/// Wait while `running`, following the quit in `log`: `limits` is how long Claude may say nothing,
+/// then how long it may keep its question open.
+fn wait_for_quit(
+    running: impl Fn() -> bool,
+    log: &mut QuitLog,
+    limits: (Duration, Duration),
+    watch: &Watch,
+) -> anyhow::Result<()> {
+    let mut quitting = Quitting::Asked;
+    watch.tell(quitting);
+    let mut deadline = Some(Instant::now() + limits.0);
+    while running() {
+        if let Some(news) = log.read().filter(|n| *n != quitting) {
+            quitting = news;
+            deadline = match quitting {
+                Quitting::Asked => deadline,
+                Quitting::Confirming => Some(Instant::now() + limits.1),
+                Quitting::AfterWork => None,
+            };
+            watch.tell(quitting);
+        }
+        if watch.stopped() {
+            return Err(NotReady::Stopped.into());
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(NotReady::StillOpen.into());
         }
-        std::thread::sleep(Duration::from_millis(250));
+        // Waiting for Claude's work can take hours: look less often then.
+        let pause = if quitting == Quitting::AfterWork { 1000 } else { 250 };
+        std::thread::sleep(Duration::from_millis(pause));
     }
     Ok(())
+}
+
+/// What Claude writes to `main.log` while it quits, read as it comes.
+struct QuitLog {
+    path: PathBuf,
+    offset: u64,
+}
+
+impl QuitLog {
+    fn start(path: &Path) -> QuitLog {
+        let offset = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        QuitLog { path: path.to_path_buf(), offset }
+    }
+
+    /// The latest word on the quit in what was written since the last look.
+    fn read(&mut self) -> Option<Quitting> {
+        let len = fs::metadata(&self.path).ok()?.len();
+        if len < self.offset {
+            self.offset = 0; // a new log file
+        }
+        if len == self.offset {
+            return None;
+        }
+        let mut f = fs::File::open(&self.path).ok()?;
+        f.seek(SeekFrom::Start(self.offset)).ok()?;
+        let mut text = Vec::new();
+        f.take(len - self.offset).read_to_end(&mut text).ok()?;
+        // Only whole lines; a line still being written is read next time.
+        let end = text.iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
+        self.offset += end as u64;
+        quit_news(&text[..end])
+    }
+}
+
+/// The latest word on a quit in some of Claude's log: its quit guard vetoing the quit to ask,
+/// then deferring it when the answer is to wait.
+fn quit_news(text: &[u8]) -> Option<Quitting> {
+    let has = |line: &[u8], needle: &[u8]| line.windows(needle.len()).any(|w| w == needle);
+    text.split(|b| *b == b'\n').fold(None, |news, line| {
+        if has(line, b"vetoed by before-quit interceptor") {
+            Some(Quitting::Confirming)
+        } else if has(line, b"[updater-guard] restart deferred") {
+            Some(Quitting::AfterWork)
+        } else {
+            news
+        }
+    })
 }
 
 /// Wait up to `timeout` while Claude's updater replaces the app: starting Claude, or changing
@@ -178,6 +293,8 @@ pub struct InitLine {
     pub org: String,
     /// `<log file name>@<byte offset>`: changes whenever Desktop loads a session list again.
     pub marker: String,
+    /// When Desktop wrote it (Unix seconds), when its timestamp can be read.
+    pub at: Option<f64>,
 }
 
 pub fn last_init(ctx: &Ctx) -> Option<InitLine> {
@@ -196,7 +313,7 @@ pub fn last_init(ctx: &Ctx) -> Option<InitLine> {
         let scan = scans.entry(path.clone()).or_default();
         if let Some((acct, org)) = scan_log(&path, scan) {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            return Some(InitLine { acct, org, marker: format!("{name}@{}", scan.found_at) });
+            return Some(InitLine { acct, org, marker: format!("{name}@{}", scan.found_at), at: scan.found_time });
         }
     }
     None
@@ -242,10 +359,22 @@ fn scan_log(path: &Path, scan: &mut LogScan) -> Option<(String, String)> {
         if let (Some(acct), Some(org)) = (value_after(&tail, "accountId="), value_after(&tail, "orgId=")) {
             scan.found = Some((acct, org));
             scan.found_at = start + idx as u64;
+            let line = buf[..idx].iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
+            scan.found_time = line_time(&buf[line..idx]);
         }
     }
     scan.offset = start + buf.len() as u64;
     scan.found.clone()
+}
+
+/// The local time a log line starts with, as electron-log writes it (`2026-09-30 11:57:01 …`,
+/// or `[2026-09-30 11:57:01.123] …`), in Unix seconds.
+fn line_time(line: &[u8]) -> Option<f64> {
+    use chrono::{Local, NaiveDateTime, TimeZone as _};
+    let text = String::from_utf8_lossy(line.get(..24.min(line.len()))?);
+    let text = text.trim_start_matches('[');
+    let stamp = NaiveDateTime::parse_from_str(text.get(..19)?, "%Y-%m-%d %H:%M:%S").ok()?;
+    Local.from_local_datetime(&stamp).earliest().map(|t| t.timestamp() as f64)
 }
 
 fn value_after(text: &str, key: &str) -> Option<String> {
@@ -461,5 +590,148 @@ mod process {
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     pub fn desktop_running() -> Option<bool> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_asking_and_waiting_shows_in_its_log() {
+        let asked = b"2026-10-01 20:00:00 [info] beforeQuit: handler fired, going down\n\
+2026-10-01 20:00:00 [info] beforeQuit: vetoed by before-quit interceptor\n";
+        assert_eq!(quit_news(asked), Some(Quitting::Confirming));
+        let waiting =
+            b"2026-10-01 20:00:09 [info] [updater-guard] restart deferred; 2 local session(s) still running\n";
+        assert_eq!(quit_news(waiting), Some(Quitting::AfterWork));
+        assert_eq!(quit_news(b"2026-10-01 20:00:00 [info] willQuit: handler is ready for quit, so quitting\n"), None);
+    }
+
+    /// A stand-in for Claude while it quits: whether it runs, and its log.
+    struct Claude {
+        _dir: tempfile::TempDir,
+        log: PathBuf,
+        running: std::sync::Arc<AtomicBool>,
+    }
+
+    impl Claude {
+        fn new() -> Claude {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("main.log");
+            fs::write(&log, "2026-10-01 20:00:00 [info] started\n").unwrap();
+            Claude { _dir: dir, log, running: std::sync::Arc::new(AtomicBool::new(true)) }
+        }
+
+        fn says(&self, line: &str) {
+            use std::io::Write as _;
+            let mut f = fs::OpenOptions::new().append(true).open(&self.log).unwrap();
+            writeln!(f, "2026-10-01 20:00:01 [info] {line}").unwrap();
+        }
+
+        /// Its log from now on, as `quit` reads it right before asking Claude to quit.
+        fn log(&self) -> QuitLog {
+            QuitLog::start(&self.log)
+        }
+
+        /// Wait for it to quit as `quit` does, with `limits` in milliseconds; what was heard, and how
+        /// it ended.
+        fn wait(
+            &self,
+            mut log: QuitLog,
+            stop: &AtomicBool,
+            limits: (u64, u64),
+        ) -> (Vec<Quitting>, Result<(), NotReady>) {
+            let heard = std::sync::Mutex::new(Vec::new());
+            let tell = |q: Quitting| heard.lock().unwrap().push(q);
+            let watch = Watch { progress: Some(&tell), stop: Some(stop) };
+            let running = self.running.clone();
+            let limits = (Duration::from_millis(limits.0), Duration::from_millis(limits.1));
+            let result = wait_for_quit(|| running.load(Ordering::Relaxed), &mut log, limits, &watch)
+                .map_err(|e| *e.downcast_ref::<NotReady>().unwrap());
+            (heard.into_inner().unwrap(), result)
+        }
+    }
+
+    #[test]
+    fn cancelling_in_claude_then_stopping_here_changes_nothing() {
+        let claude = Claude::new();
+        let stop = AtomicBool::new(false);
+        let log = claude.log();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                claude.says("beforeQuit: vetoed by before-quit interceptor");
+                // Cancel in Claude says nothing; the user stops waiting here instead.
+                std::thread::sleep(Duration::from_millis(200));
+                stop.store(true, Ordering::Relaxed);
+            });
+            let (heard, result) = claude.wait(log, &stop, (5000, 5000));
+            assert_eq!(heard, [Quitting::Asked, Quitting::Confirming]);
+            assert_eq!(result, Err(NotReady::Stopped));
+        });
+    }
+
+    #[test]
+    fn waiting_for_claudes_work_waits_as_long_as_it_takes() {
+        let claude = Claude::new();
+        let stop = AtomicBool::new(false);
+        let log = claude.log();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                claude.says("beforeQuit: vetoed by before-quit interceptor");
+                // The user reads the question for a moment (longer than one look at the log).
+                std::thread::sleep(Duration::from_millis(400));
+                claude.says("[updater-guard] restart deferred; 1 local session(s) still running");
+                // Longer than either limit: the user chose to wait.
+                std::thread::sleep(Duration::from_millis(1800));
+                claude.says("[updater-guard] all local sessions idle; restarting");
+                claude.running.store(false, Ordering::Relaxed);
+            });
+            let (heard, result) = claude.wait(log, &stop, (300, 1500));
+            assert_eq!(heard, [Quitting::Asked, Quitting::Confirming, Quitting::AfterWork]);
+            assert_eq!(result, Ok(()));
+        });
+    }
+
+    #[test]
+    fn claude_gets_a_limit_for_saying_nothing_and_for_asking() {
+        let claude = Claude::new();
+        let stop = AtomicBool::new(false);
+        assert_eq!(claude.wait(claude.log(), &stop, (300, 5000)), (vec![Quitting::Asked], Err(NotReady::StillOpen)));
+        // Asked, and nobody answers: the longer limit, then give up.
+        claude.says("beforeQuit: vetoed by before-quit interceptor");
+        let started = Instant::now();
+        let mut log = QuitLog::start(&claude.log);
+        log.offset = 0;
+        let running = claude.running.clone();
+        let result = wait_for_quit(
+            || running.load(Ordering::Relaxed),
+            &mut log,
+            (Duration::from_millis(100), Duration::from_millis(400)),
+            &Watch::default(),
+        );
+        assert_eq!(result.unwrap_err().downcast_ref::<NotReady>(), Some(&NotReady::StillOpen));
+        assert!(started.elapsed() >= Duration::from_millis(400), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_quit_log_is_read_as_it_grows() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.log");
+        fs::write(&path, "an old veto: beforeQuit: vetoed by before-quit interceptor\n").unwrap();
+        let mut log = QuitLog::start(&path);
+        assert_eq!(log.read(), None, "only what comes after the request counts");
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        // Half a line is left for the next look.
+        write!(f, "beforeQuit: vetoed by before-quit").unwrap();
+        assert_eq!(log.read(), None);
+        writeln!(f, " interceptor").unwrap();
+        assert_eq!(log.read(), Some(Quitting::Confirming));
+        writeln!(f, "[updater-guard] restart deferred; 1 local session(s) still running").unwrap();
+        assert_eq!(log.read(), Some(Quitting::AfterWork));
+        // Claude started a new log.
+        fs::write(&path, "x\n").unwrap();
+        assert_eq!(log.read(), None);
     }
 }

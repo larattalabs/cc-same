@@ -18,6 +18,8 @@ pub enum Command {
     Update,
     /// Switch Claude to this account.
     SwitchTo(String),
+    /// Switch Claude to the next account in the list.
+    SwitchNext,
     /// Restart Claude on its sign-in page, to sign in to another account.
     SignInAnother,
     Quit,
@@ -27,7 +29,8 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayAccount {
     pub id: String,
-    pub name: String,
+    /// Its number and name, and what it last used of its plan.
+    pub label: String,
     /// Claude is signed in to it.
     pub current: bool,
 }
@@ -52,8 +55,11 @@ pub struct Status {
     pub update_enabled: bool,
     /// Switching accounts is available on this system.
     pub can_switch: bool,
-    /// The account Claude is signed in to, then every other account CC Same knows.
+    /// Every account CC Same knows: the list by number, then the others.
     pub accounts: Vec<TrayAccount>,
+    /// "Next Account: bob@example.com", and whether there is one.
+    pub next_label: String,
+    pub has_next: bool,
     pub switch_label: String,
     pub sign_in_label: String,
     pub quit: String,
@@ -71,13 +77,14 @@ impl Status {
         };
         let logins = store.overview.as_ref().map(|o| o.logins.clone()).unwrap_or_default();
         // Every account, not only the ones with a sign-in kept: choosing one without asks to sign in.
-        let signed_in = logins.signed_in.as_ref().map(|id| (id.clone(), store.account_name(id)));
-        let others = store
-            .accounts()
-            .into_iter()
-            .map(|a| (a.id, a.name))
-            .chain(logins.saved.iter().map(|s| (s.account.clone(), store.account_name(&s.account))));
-        let accounts = tray_accounts(signed_in, others);
+        let rows = store.accounts();
+        let saved = logins.saved.iter().map(|s| (s.account.clone(), store.account_name(&s.account)));
+        let accounts = tray_accounts(&rows, logins.signed_in.as_deref(), saved);
+        let next = store.next_account();
+        let next_label = match &next {
+            Some(id) => tf("tray.next_account", &[("account", &store.account_name(id))]),
+            None => t("tray.next_none"),
+        };
         Status {
             title: mood.title(),
             detail: mood.detail(),
@@ -95,6 +102,8 @@ impl Status {
             // first overview arrives, and the submenu is only ever added then.
             can_switch: cc_same_core::logins::supported(),
             accounts,
+            next_label,
+            has_next: next.is_some(),
             switch_label: t("tray.switch_account"),
             sign_in_label: t("tray.sign_in_another"),
             quit: t("app.quit"),
@@ -106,16 +115,30 @@ impl Status {
     }
 }
 
-/// The accounts menu: the one Claude is signed in to first, then the others, each once.
+/// The accounts menu: the window's rows (the list by number, then the others), and any account
+/// with a sign-in kept that has no row, each once.
 fn tray_accounts(
-    signed_in: Option<(String, String)>,
-    others: impl IntoIterator<Item = (String, String)>,
+    rows: &[crate::model::Account],
+    signed_in: Option<&str>,
+    saved: impl IntoIterator<Item = (String, String)>,
 ) -> Vec<TrayAccount> {
-    let mut list: Vec<TrayAccount> =
-        signed_in.into_iter().map(|(id, name)| TrayAccount { id, name, current: true }).collect();
-    for (id, name) in others {
+    let mut list: Vec<TrayAccount> = rows
+        .iter()
+        .map(|a| {
+            let mut label = match a.number {
+                Some(n) => format!("{n}  {}", a.name),
+                None => a.name.clone(),
+            };
+            if let Some(usage) = a.usage {
+                label = format!("{label}  ({})", usage.text());
+            }
+            TrayAccount { id: a.id.clone(), label, current: signed_in == Some(a.id.as_str()) }
+        })
+        .collect();
+    for (id, name) in saved {
         if !list.iter().any(|a| a.id == id) {
-            list.push(TrayAccount { id, name, current: false });
+            let current = signed_in == Some(id.as_str());
+            list.push(TrayAccount { id, label: name, current });
         }
     }
     list
@@ -184,13 +207,17 @@ mod platform {
         _events: Task<()>,
     }
 
-    /// Fill the accounts menu: the account in use (checked), the ones to switch to, then signing
-    /// in to another.
+    /// Fill the accounts menu: the next account, every account (the one in use checked), then
+    /// signing in to another.
     fn fill_accounts(menu: &Submenu, status: &Status, commands: &RefCell<Vec<(MenuId, Command)>>) {
         while menu.remove_at(0).is_some() {}
         let mut found = Vec::new();
+        let next = MenuItem::new(&status.next_label, status.has_next && status.can_sync, None);
+        let _ = menu.append(&next);
+        found.push((next.id().clone(), Command::SwitchNext));
+        let _ = menu.append(&PredefinedMenuItem::separator());
         for account in &status.accounts {
-            let item = CheckMenuItem::new(&account.name, !account.current && status.can_sync, account.current, None);
+            let item = CheckMenuItem::new(&account.label, !account.current && status.can_sync, account.current, None);
             let _ = menu.append(&item);
             if !account.current {
                 found.push((item.id().clone(), Command::SwitchTo(account.id.clone())));
@@ -321,8 +348,8 @@ mod platform {
             self.quit.set_text(&status.quit);
             if let Some(accounts) = &self.accounts {
                 accounts.set_text(&status.switch_label);
-                let changed = (&last.accounts, &last.sign_in_label, last.can_sync)
-                    != (&status.accounts, &status.sign_in_label, status.can_sync);
+                let changed = (&last.accounts, &last.next_label, last.has_next, &last.sign_in_label, last.can_sync)
+                    != (&status.accounts, &status.next_label, status.has_next, &status.sign_in_label, status.can_sync);
                 if changed {
                     fill_accounts(accounts, status, &self.account_commands);
                 }
@@ -358,25 +385,31 @@ mod platform {
             let _ = self.commands.send(command);
         }
 
-        /// "Switch Account": the account in use (checked), the ones to switch to, then signing in
-        /// to another.
+        /// "Switch Account": the next account, every account (the one in use checked), then
+        /// signing in to another.
         fn accounts_menu(&self) -> SubMenu<Self> {
             let s = &self.status;
-            let mut submenu: Vec<ksni::MenuItem<Self>> = s
-                .accounts
-                .iter()
-                .map(|account| {
-                    let id = account.id.clone();
-                    CheckmarkItem {
-                        label: account.name.clone(),
-                        enabled: !account.current && s.can_sync,
-                        checked: account.current,
-                        activate: Box::new(move |this: &mut Self| this.send(Command::SwitchTo(id.clone()))),
-                        ..Default::default()
-                    }
-                    .into()
-                })
-                .collect();
+            let mut submenu: Vec<ksni::MenuItem<Self>> = vec![
+                StandardItem {
+                    label: s.next_label.clone(),
+                    enabled: s.has_next && s.can_sync,
+                    activate: Box::new(|this: &mut Self| this.send(Command::SwitchNext)),
+                    ..Default::default()
+                }
+                .into(),
+                ksni::MenuItem::Separator,
+            ];
+            submenu.extend(s.accounts.iter().map(|account| -> ksni::MenuItem<Self> {
+                let id = account.id.clone();
+                CheckmarkItem {
+                    label: account.label.clone(),
+                    enabled: !account.current && s.can_sync,
+                    checked: account.current,
+                    activate: Box::new(move |this: &mut Self| this.send(Command::SwitchTo(id.clone()))),
+                    ..Default::default()
+                }
+                .into()
+            }));
             if !s.accounts.is_empty() {
                 submenu.push(ksni::MenuItem::Separator);
             }
@@ -538,25 +571,46 @@ mod platform {
 mod tests {
     use super::*;
 
-    fn pair(id: &str, name: &str) -> (String, String) {
-        (id.into(), name.into())
+    fn row(id: &str, name: &str, number: Option<u32>) -> crate::model::Account {
+        crate::model::Account {
+            id: id.into(),
+            name: name.into(),
+            has_email: true,
+            sessions: 0,
+            missing: 0,
+            open: false,
+            excluded: false,
+            broken: false,
+            login: crate::model::Login::Unknown,
+            number,
+            alias: None,
+            sits_out: false,
+            usage: None,
+            has_lists: true,
+        }
     }
 
     #[test]
-    fn every_account_is_listed_once_with_claudes_first() {
-        let list = tray_accounts(
-            Some(pair("b", "bob@example.com")),
+    fn every_account_is_listed_once_by_number() {
+        let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        let mut bob = row("b", "bob@example.com", Some(2));
+        bob.usage = Some(crate::model::PlanUse { five_hour: Some(0), weekly: Some(99), at: 0 });
+        let rows = [row("a", "ada@example.com", Some(1)), bob, row("c", "Account 0c0c0c0c", None)];
+        let saved = [("b".to_string(), "bob@example.com".to_string()), ("d".into(), "dan@example.com".into())];
+        let list = tray_accounts(&rows, Some("b"), saved);
+        let shown: Vec<_> = list.iter().map(|a| (a.label.as_str(), a.current)).collect();
+        assert_eq!(
+            shown,
             [
-                pair("a", "ada@example.com"),
-                pair("b", "bob@example.com"),
-                pair("c", "Account 0c0c0c0c"),
-                pair("a", "ada@example.com"),
-            ],
+                ("1  ada@example.com", false),
+                ("2  bob@example.com  (5h 0% · 7d 99%)", true),
+                ("Account 0c0c0c0c", false),
+                ("dan@example.com", false),
+            ]
         );
-        let shown: Vec<_> = list.iter().map(|a| (a.id.as_str(), a.current)).collect();
-        assert_eq!(shown, [("b", true), ("a", false), ("c", false)]);
         // Signed out: nobody is current.
-        assert!(tray_accounts(None, [pair("a", "ada@example.com")]).iter().all(|a| !a.current));
+        assert!(tray_accounts(&rows, None, []).iter().all(|a| !a.current));
     }
 
     /// The menu is built once, at launch, before the accounts have been read: Switch Account must

@@ -79,6 +79,10 @@ pub struct Overview {
     pub retention: crate::retention::Retention,
     /// Who Claude is signed in to, and the sign-ins set aside for switching.
     pub logins: crate::logins::Logins,
+    /// The numbered list of accounts to switch between.
+    pub roster: crate::accounts::Roster,
+    /// What each account last used of its plan, as Claude last saw it.
+    pub usage: BTreeMap<String, crate::usage::Usage>,
     pub service: ServiceStatus,
     pub heartbeat: Option<Heartbeat>,
     pub last_sync: Option<LastSync>,
@@ -136,8 +140,12 @@ pub fn summarize(plan: &Plan) -> PlanView {
     }
 }
 
+/// Everything at once. Nothing of Claude's is changed; CC Same's list of accounts is brought up
+/// to date ([`crate::accounts::observe`]).
 pub fn overview(ctx: &Ctx) -> Overview {
     let cfg = ctx.config();
+    let roster = crate::accounts::observe(ctx);
+    let usage = crate::accounts::usage(ctx, &roster);
     let app = desktop::detect(ctx);
     let state = State::load(&ctx.paths);
     let labels = scan::account_labels(ctx);
@@ -227,6 +235,8 @@ pub fn overview(ctx: &Ctx) -> Overview {
         warnings,
         retention,
         logins: crate::logins::list(ctx),
+        roster,
+        usage,
         service: service::status(ctx),
         heartbeat: Heartbeat::read(&ctx.paths),
         last_sync: state.last_sync.clone(),

@@ -3,6 +3,34 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Changed
+
+- **Your accounts are a numbered list, the way claude-swap keeps them.** An account joins by
+  itself the first time Claude signs in to it, and keeps its number. In the menu bar, Switch
+  Account starts with **Next Account**, which goes round the list; an account's menu in the window
+  (right-click) leaves it out of that, or removes it from the list. The command line follows
+  claude-swap too: `cc-same switch` goes to the next account, `cc-same switch 2` or
+  `cc-same switch work` to one (aliases come from `cc-same alias`), and `--strategy best` to the
+  one with the most of its plan left; `add`, `remove`, `disable`, `enable`, `move` and
+  `accounts --json` are new. `sign-in` and `forget` still work.
+
+### Added
+
+- **Plan usage beside each account**: the 5-hour and weekly windows, as Claude last read them.
+  CC Same reads them from Claude's own record and asks Anthropic nothing, so an account's numbers
+  are as fresh as the last time Claude used it.
+
+### Fixed
+
+- **A switch could hang on “Restarting Claude…”.** When Claude has work in progress, it asks
+  before it quits (“Claude is still working”). Choosing Cancel there left CC Same waiting for a
+  minute, and choosing Wait for Claude made it give up while Claude went on to quit later, still
+  signed in to the same account and not reopened. CC Same now follows the answer: while Claude
+  asks, it says so and offers **Stop Waiting**; when the answer is to wait, it waits for the work
+  to finish and then switches.
+
 ## 0.1.8 - 2026-10-01
 
 ### Fixed

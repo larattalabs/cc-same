@@ -110,6 +110,76 @@ pub struct Account {
     pub broken: bool,
     /// Whether Claude can switch to this account.
     pub login: Login,
+    /// Its number in the list of accounts to switch between; none until Claude has been seen
+    /// signed in to it.
+    pub number: Option<u32>,
+    pub alias: Option<String>,
+    /// Left out of "Next Account".
+    pub sits_out: bool,
+    /// What it last used of its plan, as Claude saw it.
+    pub usage: Option<PlanUse>,
+    /// Claude keeps session lists for it (an account that just joined may have none yet).
+    pub has_lists: bool,
+}
+
+/// What an account last used of its plan, when Claude last read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanUse {
+    /// Percent of the 5-hour window; 0 once the reading is older than the window.
+    pub five_hour: Option<u32>,
+    /// Percent of the weekly window, while the reading is less than a week old.
+    pub weekly: Option<u32>,
+    /// When Claude read it (Unix seconds).
+    pub at: i64,
+}
+
+/// How full a plan is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Fullness {
+    Roomy,
+    /// 80% or more of a window.
+    Nearly,
+    /// A window is used up.
+    Full,
+}
+
+impl PlanUse {
+    pub fn of(usage: &cc_same_core::usage::Usage, now: f64) -> Option<PlanUse> {
+        let percent = |p: f64| p.clamp(0., 999.).round() as u32;
+        let five_hour = usage.five_hour_at(now).map(percent);
+        let weekly = usage.weekly_at(now).map(percent);
+        (five_hour.is_some() || weekly.is_some()).then_some(PlanUse { five_hour, weekly, at: usage.at as i64 })
+    }
+
+    /// Both windows, `5h 12% · 7d 58%`, in the interface language.
+    pub fn text(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(p) = self.five_hour {
+            parts.push(tf("usage.five_hour", &[("percent", &p)]));
+        }
+        if let Some(p) = self.weekly {
+            parts.push(tf("usage.weekly", &[("percent", &p)]));
+        }
+        parts.join(" · ")
+    }
+
+    /// The fuller window only, `7d 58%`: the one that would stop Claude first.
+    pub fn short(&self) -> String {
+        match (self.five_hour, self.weekly) {
+            (Some(h), Some(w)) if h > w => tf("usage.five_hour", &[("percent", &h)]),
+            (_, Some(w)) => tf("usage.weekly", &[("percent", &w)]),
+            (Some(h), None) => tf("usage.five_hour", &[("percent", &h)]),
+            (None, None) => String::new(),
+        }
+    }
+
+    pub fn fullness(&self) -> Fullness {
+        match self.five_hour.max(self.weekly).unwrap_or(0) {
+            100.. => Fullness::Full,
+            80.. => Fullness::Nearly,
+            _ => Fullness::Roomy,
+        }
+    }
 }
 
 /// Where an account stands for switching Claude to it.
@@ -142,6 +212,9 @@ impl Account {
         }
         if self.excluded {
             return t("account.excluded");
+        }
+        if !self.has_lists {
+            return t("account.no_lists");
         }
         let mut parts = vec![tn("account.sessions", self.sessions, &[])];
         if self.missing > 0 {
@@ -176,9 +249,9 @@ pub enum Placement {
     Broken,
 }
 
-/// One row per account, labelled with an email when we know it.
+/// One row per account, labelled with an email when we know it: the accounts in the list by
+/// number, then the ones only seen in Claude's session folders.
 pub fn accounts(ov: &Overview) -> Vec<Account> {
-    let Some(code) = ov.surface(Surface::Code) else { return Vec::new() };
     let logins = &ov.logins;
     let login = |acct: &str| match logins.saved(acct) {
         _ if !logins.supported => Login::Unsupported,
@@ -186,46 +259,53 @@ pub fn accounts(ov: &Overview) -> Vec<Account> {
         Some(saved) => Login::Saved { stale: saved.stale() },
         None => Login::Unknown,
     };
+    let now = cc_same_core::fsx::now_secs();
     let mut groups: Vec<Vec<&PartitionView>> = Vec::new();
-    for p in &code.partitions {
+    for p in ov.surface(Surface::Code).map(|c| c.partitions.as_slice()).unwrap_or_default() {
         match groups.iter_mut().find(|g| g[0].part.acct == p.part.acct) {
             Some(group) => group.push(p),
             None => groups.push(vec![p]),
         }
     }
-    let mut rows: Vec<Account> = groups
-        .into_iter()
-        .map(|lists| {
-            let acct = lists[0].part.acct.clone();
-            // The list Claude shows for the account: the one it has open, else the fullest.
-            let shown = lists
-                .iter()
-                .copied()
-                .max_by_key(|p| {
-                    let open = ov.app.showing(&p.part);
-                    (!p.excluded, open, p.sessions, Reverse(p.missing), Reverse(p.part.org.as_str()))
-                })
-                .expect("a group has a list");
-            let email = lists
-                .iter()
-                .find_map(|p| p.email.clone())
-                .or_else(|| logins.saved(&acct).and_then(|s| s.email.clone()));
-            Account {
-                name: email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(&acct))])),
-                has_email: email.is_some(),
-                sessions: shown.sessions,
-                missing: if shown.excluded { 0 } else { shown.missing },
-                open: ov.app.open_account.as_deref() == Some(acct.as_str()),
-                excluded: lists.iter().all(|p| p.excluded),
-                broken: lists.iter().any(|p| p.error.is_some() || p.part.is_link),
-                login: login(&acct),
-                id: acct,
-            }
-        })
-        .collect();
-    // Named accounts first, then the ones we only know by id; excluded ones last.
+    let row = |acct: &str, lists: &[&PartitionView]| {
+        let slot = ov.roster.slot(acct);
+        // The list Claude shows for the account: the one it has open, else the fullest.
+        let shown = lists.iter().copied().max_by_key(|p| {
+            let open = ov.app.showing(&p.part);
+            (!p.excluded, open, p.sessions, Reverse(p.missing), Reverse(p.part.org.as_str()))
+        });
+        let email = lists
+            .iter()
+            .find_map(|p| p.email.clone())
+            .or_else(|| slot.and_then(|s| s.email.clone()))
+            .or_else(|| logins.saved(acct).and_then(|s| s.email.clone()));
+        Account {
+            name: email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(acct))])),
+            has_email: email.is_some(),
+            sessions: shown.map_or(0, |p| p.sessions),
+            missing: shown.filter(|p| !p.excluded).map_or(0, |p| p.missing),
+            open: ov.app.open_account.as_deref() == Some(acct),
+            excluded: !lists.is_empty() && lists.iter().all(|p| p.excluded),
+            broken: lists.iter().any(|p| p.error.is_some() || p.part.is_link),
+            login: login(acct),
+            number: slot.map(|s| s.number),
+            alias: slot.and_then(|s| s.alias.clone()),
+            sits_out: slot.is_some_and(|s| s.disabled),
+            usage: ov.usage.get(acct).and_then(|u| PlanUse::of(u, now)),
+            has_lists: !lists.is_empty(),
+            id: acct.to_string(),
+        }
+    };
+    let mut rows: Vec<Account> = groups.iter().map(|lists| row(&lists[0].part.acct, lists)).collect();
+    for slot in &ov.roster.slots {
+        if !rows.iter().any(|r| r.id == slot.account) {
+            rows.push(row(&slot.account, &[]));
+        }
+    }
+    // The list by number; then named accounts, the ones we only know by id, and excluded ones.
     rows.sort_by(|a, b| {
-        let key = |r: &Account| (r.excluded, !r.has_email, r.name.to_lowercase(), r.id.clone());
+        let key =
+            |r: &Account| (r.number.is_none(), r.number, r.excluded, !r.has_email, r.name.to_lowercase(), r.id.clone());
         key(a).cmp(&key(b))
     });
     rows
@@ -251,7 +331,7 @@ pub fn mood(ov: Option<&Overview>, syncing: bool, pending_for: Option<Duration>)
         return Mood::Linked(n);
     }
     let accounts = accounts(ov);
-    let taking_part = accounts.iter().filter(|a| !a.excluded && !a.broken).count();
+    let taking_part = accounts.iter().filter(|a| a.has_lists && !a.excluded && !a.broken).count();
     // Two lists are enough to keep in step, even two organizations of one account.
     let lists = ov.surface(Surface::Code).map_or(0, |code| {
         code.partitions.iter().filter(|p| !p.excluded && p.error.is_none() && !p.part.is_link).count()
@@ -333,6 +413,11 @@ mod tests {
             excluded: false,
             broken: false,
             login: Login::Unknown,
+            number: None,
+            alias: None,
+            sits_out: false,
+            usage: None,
+            has_lists: true,
         }
     }
 
@@ -387,6 +472,8 @@ mod tests {
             warnings: Vec::new(),
             retention: Default::default(),
             logins: cc_same_core::logins::Logins { supported: false, signed_in: Some(BOB.into()), saved: Vec::new() },
+            roster: Default::default(),
+            usage: Default::default(),
             service: Default::default(),
             heartbeat: None,
             last_sync: None,
@@ -420,6 +507,58 @@ mod tests {
         let mut ov = two_accounts_in_two_orgs(None);
         ov.surfaces[0].partitions.retain(|p| p.part.acct == BOB);
         assert_eq!(mood(Some(&ov), false, None), Mood::InSync { sessions: 201, accounts: 1 });
+    }
+
+    #[test]
+    fn the_list_comes_first_in_number_order() {
+        use cc_same_core::accounts::{Roster, Slot};
+        let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        const CY: &str = "cccccccc-0000-4000-8000-000000000003";
+        let mut ov = two_accounts_in_two_orgs(None);
+        let slot = |number, account: &str, alias: Option<&str>| Slot {
+            number,
+            account: account.into(),
+            email: Some(format!("{}@example.com", &account[..1])),
+            alias: alias.map(str::to_string),
+            ..Slot::default()
+        };
+        // Bob and Cy are in the list (Cy has no session list yet); Ada only has her sessions.
+        ov.roster = Roster { version: 1, slots: vec![slot(1, BOB, Some("home")), slot(2, CY, None)] };
+        let now = cc_same_core::fsx::now_secs();
+        let read = cc_same_core::usage::Usage { at: now - 60.0, five_hour: Some(97.0), weekly: Some(40.0) };
+        ov.usage = [(BOB.to_string(), read)].into();
+        let rows = accounts(&ov);
+        let shown: Vec<_> = rows.iter().map(|a| (a.name.as_str(), a.number, a.has_lists)).collect();
+        assert_eq!(
+            shown,
+            [("bob@example.com", Some(1), true), ("c@example.com", Some(2), false), ("ada@example.com", None, true)]
+        );
+        assert_eq!(rows[0].alias.as_deref(), Some("home"));
+        assert_eq!(rows[1].detail(), "No sessions yet");
+        let usage = rows[0].usage.unwrap();
+        assert_eq!((usage.short().as_str(), usage.text().as_str()), ("5h 97%", "5h 97% · 7d 40%"));
+        assert_eq!(usage.fullness(), Fullness::Nearly);
+        // The headline still counts the accounts whose sessions are kept in step.
+        assert_eq!(mood(Some(&ov), false, None), Mood::InSync { sessions: 201, accounts: 2 });
+    }
+
+    #[test]
+    fn plan_use_follows_the_windows() {
+        let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        let now = 1_000_000.0;
+        let read = |age: f64, five_hour, weekly| cc_same_core::usage::Usage { at: now - age, five_hour, weekly };
+        let fresh = PlanUse::of(&read(60.0, Some(12.4), Some(58.0)), now).unwrap();
+        assert_eq!((fresh.short().as_str(), fresh.fullness()), ("7d 58%", Fullness::Roomy));
+        // A day on, the 5-hour window has started over; a full week shows as full.
+        let old = PlanUse::of(&read(86_400.0, Some(80.0), Some(100.0)), now).unwrap();
+        assert_eq!((old.text().as_str(), old.fullness()), ("5h 0% · 7d 100%", Fullness::Full));
+        // Older than a week, only the 5-hour window is known (to have started over).
+        assert_eq!(PlanUse::of(&read(8.0 * 86_400.0, None, Some(90.0)), now), None);
+        rust_i18n::set_locale("zh-CN");
+        assert_eq!(fresh.text(), "5 小时 12% · 7 天 58%");
+        rust_i18n::set_locale("en");
     }
 
     #[test]

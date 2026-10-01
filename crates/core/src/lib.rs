@@ -18,6 +18,7 @@
 //! * Nothing is hard-deleted: copy-on-write snapshots before changes, a trash folder for
 //!   anything removed or replaced.
 
+pub mod accounts;
 pub mod apply;
 pub mod config;
 pub mod desktop;
@@ -33,6 +34,7 @@ pub mod retention;
 pub mod scan;
 pub mod service;
 pub mod snapshot;
+pub mod usage;
 pub mod watch;
 
 mod ctx;

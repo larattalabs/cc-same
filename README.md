@@ -44,6 +44,9 @@ comes as a small desktop app and a command-line tool. Both share one engine.
 - **Undo built in.** Snapshots of every session list, restorable from Settings.
 - **One-click account switching** (macOS). Switch Claude to another account from the window or the
   menu bar, without signing out: CC Same keeps each sign-in and trades them while Claude restarts.
+  Your accounts form a numbered list, the way [claude-swap](https://github.com/realiti4/claude-swap)
+  keeps one: **Next Account** goes round it, and each account shows its 5-hour and weekly plan
+  usage as Claude last read it.
 - **Keeps itself up to date.** A new version downloads in the background and installs when the
   window is closed or the app quits; *What's new* shows what changed.
 
@@ -86,10 +89,11 @@ cc-same status         background sync and the last sync
 cc-same snapshots      list snapshots
 cc-same restore <id>   put every session list back as it was (quit Claude first)
 cc-same retention      how long Claude Code keeps transcripts (--keep, --undo)
-cc-same accounts       your accounts, and which one Claude is signed in to
-cc-same switch <who>   switch Claude to another account (macOS)
-cc-same sign-in        restart Claude signed out, to add an account (the current one is kept)
-cc-same forget <who>   delete the sign-in kept for an account
+cc-same accounts       your accounts, numbered, with their plan usage (--json)
+cc-same switch [<who>] switch Claude to an account, or the next one (--strategy best) (macOS)
+cc-same add            restart Claude signed out, to add an account (the current one is kept)
+cc-same remove <who>   take an account off the list, forgetting the sign-in kept for it
+cc-same alias <who> <name>, disable <who>, enable <who>, move <who> <number>
 cc-same config         --exclude <account-id>, --surfaces code,cowork, --auto-join off, …
 ```
 

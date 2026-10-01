@@ -168,6 +168,8 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
                 let state = State::load(&ctx.paths);
                 let app = desktop::detect(ctx);
                 ensure_active_partition(ctx, &app, &state);
+                // An account Claude signs in to joins the list even with no window open.
+                crate::accounts::observe(ctx);
                 match apply::run_sync(ctx, "watch") {
                     Ok((_, out)) => {
                         if out.applied_total() > 0 || !out.errors.is_empty() {

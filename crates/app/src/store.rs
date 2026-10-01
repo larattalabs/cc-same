@@ -5,9 +5,10 @@ use crate::i18n::{t, tf, tn};
 use crate::model::{self, Account, Busy, Mood};
 use crate::theme::ThemeChoice;
 use crate::update::{self, Failure, Problem, Release};
+use cc_same_core::accounts::{self, Refused as ListRefused};
 use cc_same_core::config::Config;
-use cc_same_core::desktop::NotReady;
-use cc_same_core::logins::{self, Refused, Target};
+use cc_same_core::desktop::{NotReady, Quitting, Watch};
+use cc_same_core::logins::{self, Refused};
 use cc_same_core::report::{self, Overview};
 use cc_same_core::retention::{self, Kept};
 use cc_same_core::snapshot::{self, Manifest};
@@ -17,7 +18,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -32,6 +33,38 @@ const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 /// Something the user should hear about: the outcome of a task they started.
 pub enum StoreEvent {
     Done(Result<String, String>),
+}
+
+/// A switch waiting for Claude to quit: how that goes, and the way to stop waiting.
+#[derive(Debug, Default)]
+pub struct Waiting {
+    quitting: AtomicU8,
+    stop: AtomicBool,
+}
+
+impl Waiting {
+    pub fn new(quitting: Quitting) -> Waiting {
+        let waiting = Waiting::default();
+        waiting.set(quitting);
+        waiting
+    }
+
+    fn set(&self, quitting: Quitting) {
+        let n = match quitting {
+            Quitting::Asked => 0,
+            Quitting::Confirming => 1,
+            Quitting::AfterWork => 2,
+        };
+        self.quitting.store(n, Ordering::Relaxed);
+    }
+
+    pub fn quitting(&self) -> Quitting {
+        match self.quitting.load(Ordering::Relaxed) {
+            1 => Quitting::Confirming,
+            2 => Quitting::AfterWork,
+            _ => Quitting::Asked,
+        }
+    }
 }
 
 /// Claude was restarted on its sign-in page, to sign in to another account.
@@ -99,6 +132,8 @@ pub struct Store {
     pub switching_to: Option<String>,
     /// Waiting for a sign-in to another account in Claude.
     pub signing_in: Option<SigningIn>,
+    /// A switch is waiting for Claude to quit.
+    pub waiting: Option<Arc<Waiting>>,
     refreshing: bool,
     /// The background agent was compared with this version once.
     agent_checked: bool,
@@ -124,6 +159,7 @@ impl Store {
             updates: Updates::default(),
             switching_to: None,
             signing_in: None,
+            waiting: None,
             refreshing: false,
             agent_checked: false,
             fingerprint: 0,
@@ -614,22 +650,30 @@ impl Store {
         }
         self.busy = Some(Busy::Switching);
         self.switching_to = to.clone();
+        let waiting = Arc::new(Waiting::default());
+        self.waiting = Some(waiting.clone());
         cx.notify();
         let ctx = self.ctx.clone();
         cx.spawn(async move |this, cx| {
             let target = to.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    match &target {
-                        Some(account) => logins::switch(&ctx, Target::Account(account)),
-                        None => logins::switch(&ctx, Target::SignedOut),
+                .spawn({
+                    let waiting = waiting.clone();
+                    async move {
+                        let tell = |quitting: Quitting| waiting.set(quitting);
+                        let watch = Watch { progress: Some(&tell), stop: Some(&waiting.stop) };
+                        match &target {
+                            Some(account) => accounts::switch(&ctx, account, &watch),
+                            None => accounts::add(&ctx, &watch),
+                        }
                     }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = None;
                 this.switching_to = None;
+                this.waiting = None;
                 match result {
                     Ok(switched) => match &switched.to {
                         Some(account) => {
@@ -639,19 +683,80 @@ impl Store {
                         }
                         None => this.signing_in = Some(SigningIn { previous: switched.from, expected }),
                     },
+                    // Stopped by the user: nothing to apologize for.
+                    Err(error) if error.downcast_ref::<NotReady>() == Some(&NotReady::Stopped) => {
+                        let after_work = waiting.quitting() == Quitting::AfterWork;
+                        cx.emit(StoreEvent::Done(Ok(t(if after_work {
+                            "switch.stopped_after_work"
+                        } else {
+                            "switch.stopped"
+                        }))));
+                    }
                     Err(error) => cx.emit(StoreEvent::Done(Err(explain_switch(&error)))),
                 }
                 this.refresh(cx);
             });
         })
         .detach();
+        // Show how Claude's quit goes as it changes.
+        cx.spawn(async move |this, cx| {
+            let mut shown = None;
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let going = this.update(cx, |this, cx| {
+                    let quitting = this.waiting.as_ref().map(|w| w.quitting());
+                    if quitting != shown {
+                        shown = quitting;
+                        cx.notify();
+                    }
+                    quitting.is_some()
+                });
+                if !matches!(going, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
-    /// Delete the sign-in kept for `account`.
-    pub fn forget_sign_in(&mut self, account: String, cx: &mut Context<Self>) {
+    /// How Claude's quit goes while a switch waits for it.
+    pub fn quitting(&self) -> Option<Quitting> {
+        self.waiting.as_ref().map(|w| w.quitting())
+    }
+
+    /// Stop waiting for Claude to quit: the switch ends there, with nothing changed.
+    pub fn stop_waiting(&mut self, cx: &mut Context<Self>) {
+        if let Some(waiting) = &self.waiting {
+            waiting.stop.store(true, Ordering::Relaxed);
+            cx.notify();
+        }
+    }
+
+    /// The account "Next Account" switches to: the next one in the list that Claude can switch to
+    /// and that takes part.
+    pub fn next_account(&self) -> Option<String> {
+        let ov = self.overview.as_deref()?;
+        let can_switch = |s: &accounts::Slot| ov.logins.saved(&s.account).is_some();
+        let current = ov.logins.signed_in.as_deref();
+        let next =
+            accounts::pick(&ov.roster, current, accounts::Strategy::Next, can_switch, &ov.usage, fsx::now_secs());
+        next.map(|s| s.account.clone())
+    }
+
+    /// Take an account off the list, forgetting the sign-in kept for it.
+    pub fn remove_account(&mut self, account: String, cx: &mut Context<Self>) {
+        let name = self.account_name(&account);
         self.run_task(Busy::Saving, cx, move |ctx| {
-            logins::forget(ctx, &account)?;
-            Ok(t("toast.forgot"))
+            accounts::remove(ctx, &account)?;
+            Ok(tf("toast.removed", &[("account", &name)]))
+        });
+    }
+
+    /// Put an account in "Next Account", or leave it out.
+    pub fn set_in_rotation(&mut self, account: String, on: bool, cx: &mut Context<Self>) {
+        self.run_task(Busy::Saving, cx, move |ctx| {
+            accounts::set_disabled(ctx, &account, !on)?;
+            Ok(String::new())
         });
     }
 
@@ -705,6 +810,9 @@ fn install_agent(ctx: &Ctx) -> anyhow::Result<()> {
 
 /// Why a switch did not happen, in words people can act on.
 fn explain_switch(error: &anyhow::Error) -> String {
+    if let Some(ListRefused::NoOther) = error.downcast_ref::<ListRefused>() {
+        return t("switch.no_other");
+    }
     if let Some(refused) = error.downcast_ref::<Refused>() {
         return t(match refused {
             Refused::Unsupported => "switch.unsupported",
@@ -715,6 +823,7 @@ fn explain_switch(error: &anyhow::Error) -> String {
         return t(match not_ready {
             NotReady::StillOpen => "switch.still_open",
             NotReady::Updating => "switch.updating",
+            NotReady::Stopped => "switch.stopped",
         });
     }
     format!("{error:#}")
@@ -729,12 +838,20 @@ fn agent_outdated(program: &[String], bin: &Path) -> bool {
             || (registered.to_string_lossy().contains(".app/Contents/MacOS/") && !registered.exists()))
 }
 
-/// Changes worth re-reading for: Claude's session folders and state, and ours.
+/// Changes worth re-reading for: Claude's session folders and state, and ours (the account list
+/// included).
 fn fingerprint(ctx: &Ctx) -> u64 {
     let mut h = DefaultHasher::new();
     watch::fingerprint(ctx, desktop::is_running(ctx)).hash(&mut h);
     let paths = &ctx.paths;
-    for p in [paths.state_file(), paths.heartbeat_file(), paths.config_file(), paths.claude_settings.clone()] {
+    let files = [
+        paths.state_file(),
+        paths.heartbeat_file(),
+        paths.config_file(),
+        paths.claude_settings.clone(),
+        paths.roster_file(),
+    ];
+    for p in files {
         if let Ok(md) = std::fs::metadata(&p) {
             fsx::mtime_ns(&md).hash(&mut h);
         }

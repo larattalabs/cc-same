@@ -213,7 +213,12 @@ CC Same switches without signing out (macOS for now):
 
 1. It asks Claude to quit, the way the Dock does (SIGTERM, so no "control Claude" permission is
    needed), waits for it and its helpers to exit and for its updater to finish, and takes the
-   sync lock.
+   sync lock. With work in progress, Claude asks first ("Claude is still working"); CC Same reads
+   the answer from Claude's `main.log` (`vetoed by before-quit interceptor`, then
+   `[updater-guard] restart deferred` for Wait for Claude). While Claude asks, CC Same says so and
+   can stop waiting (Cancel in Claude leaves no trace to read; after ten minutes it gives up
+   anyway); when the answer is to wait, it waits as long as the work takes. Stopping changes
+   nothing.
 2. It moves Claude's sign-in, as it is, to `<state>/logins/<account>` (a rename on the same disk;
    the account is `lastKnownAccountUuid`), and moves the target account's back in its place: the
    files as they were, and the `config.json` keys written back in Claude's own format.
@@ -228,9 +233,54 @@ a failed switch is undone, and one cut short (a crash) is undone or finished the
 To add an account, CC Same sets the current sign-in aside and restarts Claude on its sign-in page;
 signing in there goes through Anthropic's own flow as usual, and CC Same takes note once Claude has
 a new sign-in. A sign-in left unused for about four weeks expires on the server; Claude then asks
-to sign in again, and nothing else is lost. The command line does the same with `cc-same switch`,
-`cc-same sign-in` and `cc-same forget`. The Claude Code command line has its own sign-in, which
-this leaves alone; one `CLAUDE_CONFIG_DIR` per account is Anthropic's way to keep several.
+to sign in again, and nothing else is lost.
+
+Why not trade only the token, as [claude-swap](https://github.com/realiti4/claude-swap) does for
+the Claude Code command line? Desktop does not use that login at all: it hands its Code and Cowork
+sessions its own token (`CLAUDE_CODE_OAUTH_TOKEN`), and keeps its sign-in in a running web session
+that a restart is the only way to change. Trading Desktop's tokens would also mean decrypting and
+handling them, which CC Same never does. It keeps the files whole and unread instead, and moves
+rather than copies them, so a sign-in whose tokens rotate is never put back twice. The Claude Code
+command line has a sign-in of its own, which CC Same leaves alone; one `CLAUDE_CONFIG_DIR` per
+account is Anthropic's way to keep several there.
+
+### The list of accounts
+
+The accounts to switch between are a numbered list in `<state>/accounts.json`, the way claude-swap
+keeps one. An account joins by itself the first time CC Same sees Claude signed in to it (the app,
+the background agent and the command line all look), or when a sign-in is kept for it, and keeps
+its number until it is removed. Accounts that only have session folders, signed in to before CC
+Same kept sign-ins, are shown apart until Claude signs in to them once more.
+
+- **Next Account** (the menu bar, or `cc-same switch` without an account) goes to the next number
+  after the account in use that has a sign-in kept, starting over after the last.
+  `--strategy next-available` skips accounts whose plan was used up when Claude last read it, and
+  `--strategy best` picks the one with the most left.
+- An **alias** (`cc-same alias 2 work`) is a lowercase name of letters, digits, `-`, `_` and `.`,
+  not only digits; anywhere an account is named, its number, alias, email or the start of its ID
+  works.
+- An account can **sit out** of Next Account (`cc-same disable`, or the check mark in its row's
+  menu) and still be switched to by name, or **move** to another number (`cc-same move`), trading
+  places with the account that had it.
+- **Removing** an account (`cc-same remove`, or its row's menu) forgets the sign-in kept for it. Its
+  sessions stay; the account Claude is signed in to cannot be removed, since it would join again at
+  once.
+
+### Plan usage
+
+While it runs, Desktop asks claude.ai how much of the open organization's plan is used, every few
+minutes, and keeps the answers for 30 days in `plan-usage-history.json` (`fh` is the 5-hour window
+and `sd` the weekly one, in percent). CC Same shows the newest answer for each account. It never
+asks Anthropic itself, so an account's numbers are as fresh as the last time Claude used it: a
+5-hour reading older than five hours counts as a window that has started over, and a weekly one
+older than a week is not shown.
+
+The samples name an organization, not an account. Desktop only gets an answer for an organization
+the signed-in account belongs to, so the samples taken after an account loads (the time of its
+`Initialization succeeded` line in `main.log`) belong to its organizations, and CC Same notes them
+in the list. Other samples are attributed by organization: one used by a single account belongs to
+it (from what was noted, else from the session folders). An organization several accounts share,
+such as a team, is left out rather than guessed.
 
 ## What cannot be synced from the outside
 

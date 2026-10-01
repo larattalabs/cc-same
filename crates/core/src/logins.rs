@@ -38,7 +38,8 @@ const KEYS_FILE: &str = "config.json";
 const ABOUT_FILE: &str = "about.json";
 const JOURNAL: &str = "switch.json";
 
-/// How long Claude gets to quit (it may ask the user something first), and its updater to finish.
+/// How long Claude gets to quit when it asks nothing ([`desktop::quit`] waits longer while it asks),
+/// and its updater to finish.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(60);
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -137,8 +138,9 @@ pub struct Switched {
 }
 
 /// Quit Claude, set its sign-in aside, put `target`'s back, and start Claude again if it was
-/// running (or, to sign in, in any case).
-pub fn switch(ctx: &Ctx, target: Target) -> Result<Switched> {
+/// running (or, to sign in, in any case). `watch` follows Claude's quit, and can stop waiting for
+/// it; once Claude has quit, the switch goes through.
+pub fn switch(ctx: &Ctx, target: Target, watch: &desktop::Watch) -> Result<Switched> {
     // A stand-in Desktop (tests, scripts) works everywhere.
     if !supported() && ctx.fake.running.is_none() {
         return Err(Refused::Unsupported.into());
@@ -155,12 +157,12 @@ pub fn switch(ctx: &Ctx, target: Target) -> Result<Switched> {
     }
     let was_running = desktop::is_running(ctx);
     if was_running {
-        desktop::quit(ctx, QUIT_TIMEOUT)?;
+        desktop::quit(ctx, QUIT_TIMEOUT, watch)?;
     }
     desktop::wait_for_update(ctx, UPDATE_TIMEOUT)?;
     // The updater starts Claude again once it is done.
     if desktop::is_running(ctx) {
-        desktop::quit(ctx, QUIT_TIMEOUT)?;
+        desktop::quit(ctx, QUIT_TIMEOUT, watch)?;
     }
     recover(&ctx.paths)?;
     let from = desktop::last_known_account(ctx);
@@ -513,7 +515,7 @@ mod tests {
     #[test]
     fn signing_in_to_another_account_sets_the_first_aside() {
         let mac = Mac::new(ADA);
-        let switched = switch(&mac.ctx, Target::SignedOut).unwrap();
+        let switched = switch(&mac.ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
         assert_eq!(switched, Switched { from: Some(ADA.into()), to: None, launched: true });
         // Claude has nobody's sign-in, and keeps every other setting.
         assert!(!mac.data().join("Cookies").exists() && !mac.data().join("Local Storage").exists());
@@ -535,11 +537,11 @@ mod tests {
     #[test]
     fn switching_back_and_forth_keeps_each_sign_in_whole() {
         let mac = Mac::new(ADA);
-        switch(&mac.ctx, Target::SignedOut).unwrap();
+        switch(&mac.ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
         mac.sign_in(GRACE);
         assert_eq!(list(&mac.ctx).signed_in.as_deref(), Some(GRACE));
 
-        let switched = switch(&mac.ctx, Target::Account(ADA)).unwrap();
+        let switched = switch(&mac.ctx, Target::Account(ADA), &desktop::Watch::default()).unwrap();
         assert_eq!(switched, Switched { from: Some(GRACE.into()), to: Some(ADA.into()), launched: false });
         assert_eq!(mac.owner(), format!("cookies of {ADA}"));
         assert_eq!(mac.config()["oauth:tokenCacheV2"], format!("tokens of {ADA}"));
@@ -555,7 +557,7 @@ mod tests {
         let mut config = mac.config();
         config.insert("oauth:tokenCacheV2".into(), "rotated tokens of ada".into());
         fs::write(mac.data().join("config.json"), desktop_json(&config).unwrap()).unwrap();
-        switch(&mac.ctx, Target::Account(GRACE)).unwrap();
+        switch(&mac.ctx, Target::Account(GRACE), &desktop::Watch::default()).unwrap();
         assert_eq!(mac.owner(), format!("cookies of {GRACE}"));
         let keys = fsx::read_json(&saved_dir(&mac.ctx.paths, ADA).join(KEYS_FILE), 1 << 20).unwrap();
         assert_eq!(keys["oauth:tokenCacheV2"], "rotated tokens of ada");
@@ -564,7 +566,7 @@ mod tests {
     #[test]
     fn claude_config_keeps_its_format() {
         let mac = Mac::new(ADA);
-        switch(&mac.ctx, Target::SignedOut).unwrap();
+        switch(&mac.ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
         let text = fs::read_to_string(mac.data().join("config.json")).unwrap();
         assert!(text.starts_with("{\n\t\"darkMode\""), "{text}");
         assert!(text.ends_with('}'));
@@ -573,7 +575,7 @@ mod tests {
     #[test]
     fn nothing_saved_means_nothing_changes() {
         let mac = Mac::new(ADA);
-        let refused = switch(&mac.ctx, Target::Account(GRACE)).unwrap_err();
+        let refused = switch(&mac.ctx, Target::Account(GRACE), &desktop::Watch::default()).unwrap_err();
         assert_eq!(refused.downcast_ref::<Refused>(), Some(&Refused::NothingSaved));
         assert_eq!(mac.owner(), format!("cookies of {ADA}"));
         assert!(mac.data().join("bridge-state.json").exists());
@@ -584,14 +586,14 @@ mod tests {
     fn a_failed_switch_puts_everything_back() {
         use std::os::unix::fs::PermissionsExt as _;
         let mac = Mac::new(ADA);
-        switch(&mac.ctx, Target::SignedOut).unwrap();
+        switch(&mac.ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
         mac.sign_in(GRACE);
         let before = mac.config();
         // Ada's sign-in cannot leave its folder, so the switch fails halfway: Grace's sign-in is
         // already set aside by then.
         let ada = saved_dir(&mac.ctx.paths, ADA);
         fs::set_permissions(&ada, fs::Permissions::from_mode(0o555)).unwrap();
-        let result = switch(&mac.ctx, Target::Account(ADA));
+        let result = switch(&mac.ctx, Target::Account(ADA), &desktop::Watch::default());
         fs::set_permissions(&ada, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
         assert_eq!(mac.owner(), format!("cookies of {GRACE}"));
@@ -659,7 +661,7 @@ mod tests {
     #[test]
     fn forgetting_deletes_a_saved_sign_in() {
         let mac = Mac::new(ADA);
-        switch(&mac.ctx, Target::SignedOut).unwrap();
+        switch(&mac.ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
         forget(&mac.ctx, ADA).unwrap();
         assert!(list(&mac.ctx).saved.is_empty());
         assert!(!saved_dir(&mac.ctx.paths, ADA).exists());
@@ -679,7 +681,7 @@ mod tests {
         fs::create_dir_all(claude_json.parent().unwrap()).unwrap();
         let oauth = serde_json::json!({ "oauthAccount": { "accountUuid": ADA, "emailAddress": "ada@lovelace.dev" } });
         fs::write(&claude_json, oauth.to_string()).unwrap();
-        switch(&mac.ctx, Target::SignedOut).unwrap();
+        switch(&mac.ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
         assert_eq!(list(&mac.ctx).saved[0].email.as_deref(), Some("ada@lovelace.dev"));
     }
 }

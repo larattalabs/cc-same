@@ -22,10 +22,16 @@ pub struct Lock {
 
 impl Lock {
     pub fn acquire(ctx: &Ctx, timeout: Duration) -> Result<Lock> {
-        fsx::create_private_dir_all(&ctx.paths.state_dir)?;
+        Lock::acquire_at(&ctx.paths.lock_file(), timeout)
+    }
+
+    /// The same kind of lock on another file in the state folder.
+    pub fn acquire_at(path: &std::path::Path, timeout: Duration) -> Result<Lock> {
+        if let Some(dir) = path.parent() {
+            fsx::create_private_dir_all(dir)?;
+        }
         // Read and write access: Windows' LockFileEx refuses a handle opened only to append.
-        let file =
-            OpenOptions::new().read(true).write(true).create(true).truncate(false).open(ctx.paths.lock_file())?;
+        let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
         let deadline = Instant::now() + timeout;
         loop {
             if os_lock::try_lock(&file)? {

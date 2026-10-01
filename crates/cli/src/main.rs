@@ -1,12 +1,15 @@
 //! `cc-same`: keep Claude Desktop's local sessions identical across all your accounts.
 
 use anyhow::{bail, Result};
-use cc_same_core::logins::{self, Target};
+use cc_same_core::accounts::{self, NotFound, Roster, Slot, Strategy};
+use cc_same_core::desktop::{self, Quitting};
+use cc_same_core::logins;
 use cc_same_core::report::{self, Overview, Warning};
 use cc_same_core::retention::{self, Kept, Limit};
 use cc_same_core::service::{self, Heartbeat};
+use cc_same_core::usage::Usage;
 use cc_same_core::watch::{self, WatchOptions};
-use cc_same_core::{apply, plan, scan, short, snapshot, Config, Ctx, FakeDesktop, LogSink, Paths, State, Surface};
+use cc_same_core::{apply, fsx, plan, scan, short, snapshot, Config, Ctx, FakeDesktop, LogSink, Paths, State, Surface};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
@@ -94,20 +97,49 @@ enum Cmd {
         #[arg(long, conflicts_with = "days")]
         undo: bool,
     },
-    /// Your accounts: which one Claude is signed in to, and which it can switch to
-    Accounts,
-    /// Switch Claude to another account (Claude restarts if it is open)
+    /// Your accounts, numbered: which one Claude is signed in to, and what each has used
+    #[command(visible_alias = "list")]
+    Accounts {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Switch Claude to another account, or the next one (Claude restarts if it is open)
     Switch {
-        /// The account's email address, or the start of its ID
-        account: String,
+        /// Its number, alias or email (default: the next account in the list)
+        account: Option<String>,
+        /// Without an account: the next one, the next one with plan left, or the one with the most left
+        #[arg(long, value_enum, conflicts_with = "account")]
+        strategy: Option<StrategyArg>,
+        #[arg(long)]
+        json: bool,
     },
-    /// Restart Claude signed out, to sign in to another account; the current one is kept
-    SignIn,
-    /// Delete the sign-in CC Same keeps for an account
-    Forget {
-        /// The account's email address, or the start of its ID
+    /// Restart Claude signed out, to add an account; the current one is kept
+    #[command(alias = "sign-in")]
+    Add,
+    /// Take an account off the list and forget the sign-in kept for it (its sessions stay)
+    #[command(alias = "forget")]
+    Remove {
+        /// Its number, alias or email
         account: String,
+        #[arg(short, long)]
+        yes: bool,
     },
+    /// Give an account a short name, or list them
+    Alias {
+        /// Its number, alias or email
+        account: Option<String>,
+        /// The new alias
+        name: Option<String>,
+        /// Take the alias away
+        #[arg(long, requires = "account", conflicts_with = "name")]
+        unset: bool,
+    },
+    /// Leave an account out of `switch` without an account (it can still be named)
+    Disable { account: String },
+    /// Put an account back in the rotation
+    Enable { account: String },
+    /// Give an account another number (the account that has it takes the old one)
+    Move { account: String, number: u32 },
     /// Show or change settings
     Config {
         /// `code` or `code,cowork` (local Cowork sessions, experimental)
@@ -126,6 +158,23 @@ enum Cmd {
         #[arg(long)]
         notify: Option<OnOff>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StrategyArg {
+    Next,
+    NextAvailable,
+    Best,
+}
+
+impl From<StrategyArg> for Strategy {
+    fn from(s: StrategyArg) -> Strategy {
+        match s {
+            StrategyArg::Next => Strategy::Next,
+            StrategyArg::NextAvailable => Strategy::NextAvailable,
+            StrategyArg::Best => Strategy::Best,
+        }
+    }
 }
 
 fn main() {
@@ -200,31 +249,14 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Cmd::Retention { days, keep, undo } => retention(&ctx, days, keep, undo),
-        Cmd::Accounts => accounts(&ctx),
-        Cmd::Switch { account } => {
-            let (id, name) = account_named(&ctx, &account)?;
-            let switched = logins::switch(&ctx, Target::Account(&id))?;
-            let restarted = if switched.launched { " (restarted)" } else { "" };
-            println!("Claude is signed in to {name}{restarted}.");
-            Ok(())
-        }
-        Cmd::SignIn => {
-            let switched = logins::switch(&ctx, Target::SignedOut)?;
-            let labels = scan::account_labels(&ctx);
-            if let Some(from) = &switched.from {
-                let name = labels.get(from).cloned().unwrap_or_else(|| format!("Account {}", short(from)));
-                println!("Set {name} aside: `cc-same switch {name}` brings it back.");
-            }
-            println!("Claude is open on its sign-in page: sign in to the other account there.");
-            println!("To switch later, use `cc-same switch`: Log out in Claude ends a sign-in for good.");
-            Ok(())
-        }
-        Cmd::Forget { account } => {
-            let (id, name) = account_named(&ctx, &account)?;
-            logins::forget(&ctx, &id)?;
-            println!("Deleted the sign-in kept for {name}.");
-            Ok(())
-        }
+        Cmd::Accounts { json } => accounts(&ctx, json),
+        Cmd::Switch { account, strategy, json } => switch(&ctx, account.as_deref(), strategy.map(Into::into), json),
+        Cmd::Add => add(&ctx),
+        Cmd::Remove { account, yes } => remove(&ctx, &account, yes),
+        Cmd::Alias { account, name, unset } => alias(&ctx, account.as_deref(), name.as_deref(), unset),
+        Cmd::Disable { account } => sit_out(&ctx, &account, true),
+        Cmd::Enable { account } => sit_out(&ctx, &account, false),
+        Cmd::Move { account, number } => move_account(&ctx, &account, number),
         Cmd::Config { surfaces, exclude, include, auto_join, notify } => {
             let mut cfg = ctx.config();
             let before = cfg.clone();
@@ -492,61 +524,262 @@ fn install(ctx: &Ctx, yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// Every account CC Same knows, by ID, with its email when known.
-fn known_accounts(ctx: &Ctx) -> BTreeMap<String, String> {
+/// Every account CC Same knows of, by ID, with its name: the list, then the ones only seen in
+/// Claude's session folders.
+fn known_accounts(ctx: &Ctx, roster: &Roster) -> BTreeMap<String, String> {
     let labels = scan::account_labels(ctx);
-    let found = logins::list(ctx);
-    let mut ids: Vec<String> = scan::discover(ctx, Surface::Code).into_iter().map(|p| p.acct).collect();
-    ids.extend(found.saved.iter().map(|s| s.account.clone()));
-    ids.extend(found.signed_in.clone());
-    ids.into_iter()
-        .map(|id| {
-            let saved_email = found.saved(&id).and_then(|s| s.email.clone());
-            let name = labels.get(&id).cloned().or(saved_email).unwrap_or_else(|| format!("Account {}", short(&id)));
-            (id, name)
-        })
-        .collect()
+    let mut known: BTreeMap<String, String> = roster.slots.iter().map(|s| (s.account.clone(), s.label())).collect();
+    for part in scan::discover(ctx, Surface::Code) {
+        let name = labels.get(&part.acct).cloned().unwrap_or_else(|| format!("Account {}", short(&part.acct)));
+        known.entry(part.acct).or_insert(name);
+    }
+    known
 }
 
-/// The one account `query` names: its email, or the start of its ID.
-fn account_named(ctx: &Ctx, query: &str) -> Result<(String, String)> {
-    let query = query.trim();
-    let matches: Vec<(String, String)> = known_accounts(ctx)
-        .into_iter()
-        .filter(|(id, name)| name.eq_ignore_ascii_case(query) || (query.len() >= 4 && id.starts_with(query)))
-        .collect();
-    match matches.as_slice() {
-        [one] => Ok(one.clone()),
-        [] => bail!("no account called {query} (see `cc-same accounts`)"),
-        _ => bail!("{query} could be {}", matches.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" or ")),
+/// The account `query` names in the list; an account only seen in Claude's session folders is
+/// named in the error, with how to add it.
+fn named(ctx: &Ctx, roster: &Roster, query: &str) -> Result<(String, String)> {
+    match roster.find(query) {
+        Ok(slot) => Ok((slot.account.clone(), slot.label())),
+        Err(NotFound::Several(names)) => bail!("{query} could be {}", names.join(" or ")),
+        Err(NotFound::None(_)) => {
+            let query = query.trim();
+            let others: Vec<(String, String)> = known_accounts(ctx, roster)
+                .into_iter()
+                .filter(|(id, name)| name.eq_ignore_ascii_case(query) || (query.len() >= 4 && id.starts_with(query)))
+                .collect();
+            match others.as_slice() {
+                [(_, name)] => bail!("{name} is not in the list yet: sign in to it once in Claude (`cc-same add`)"),
+                [] => bail!("no account called {query} (see `cc-same accounts`)"),
+                _ => bail!(
+                    "{query} could be {}",
+                    others.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(" or ")
+                ),
+            }
+        }
     }
 }
 
-fn accounts(ctx: &Ctx) -> Result<()> {
+fn name_in(roster: &Roster, account: &str) -> String {
+    roster.slot(account).map(Slot::label).unwrap_or_else(|| format!("Account {}", short(account)))
+}
+
+/// "5h 12% · 7d 58%, 2 min ago", or nothing when Claude has no reading.
+fn usage_text(usage: Option<&Usage>, now: f64) -> String {
+    let Some(u) = usage else { return String::new() };
+    let mut parts = Vec::new();
+    if let Some(p) = u.five_hour_at(now) {
+        parts.push(format!("5h {p:.0}%"));
+    }
+    if let Some(p) = u.weekly_at(now) {
+        parts.push(format!("7d {p:.0}%"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("{}, {}", parts.join(" · "), report::ago(u.at))
+}
+
+fn accounts(ctx: &Ctx, json: bool) -> Result<()> {
+    let roster = accounts::observe(ctx);
     let found = logins::list(ctx);
-    let known = known_accounts(ctx);
-    if known.is_empty() {
+    let usage = accounts::usage(ctx, &roster);
+    let now = fsx::now_secs();
+    let signed_in = found.signed_in.as_deref();
+    if json {
+        let rows: Vec<serde_json::Value> = roster
+            .slots
+            .iter()
+            .map(|s| {
+                let kept = found.saved(&s.account);
+                let u = usage.get(&s.account);
+                serde_json::json!({
+                    "number": s.number,
+                    "account": s.account,
+                    "email": s.email,
+                    "alias": s.alias,
+                    "disabled": s.disabled,
+                    "signedIn": signed_in == Some(s.account.as_str()),
+                    "switchable": kept.is_some(),
+                    "keptAt": kept.map(|k| k.set_aside_at),
+                    "stale": kept.is_some_and(|k| k.stale()),
+                    "usage": u.map(|u| serde_json::json!({
+                        "at": u.at,
+                        "fiveHour": u.five_hour_at(now),
+                        "weekly": u.weekly_at(now),
+                    })),
+                })
+            })
+            .collect();
+        let out = serde_json::json!({ "schemaVersion": 1, "signedIn": signed_in, "accounts": rows });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    if roster.slots.is_empty() {
         println!("No accounts yet: sign in to Claude.");
         return Ok(());
     }
-    let width = known.values().map(|n| n.chars().count()).max().unwrap_or(0);
-    for (id, name) in &known {
-        let state = if found.signed_in.as_deref() == Some(id.as_str()) {
-            "signed in".to_string()
-        } else if let Some(saved) = found.saved(id) {
-            let since = report::ago(saved.set_aside_at);
-            if saved.stale() {
-                format!("switch with `cc-same switch` (last used {since}; may need signing in again)")
-            } else {
-                format!("switch with `cc-same switch` (last used {since})")
-            }
-        } else {
-            "sign in once to switch here: `cc-same sign-in`".to_string()
-        };
-        println!("  {name:width$}  {state}");
-    }
     if !found.supported {
-        println!("Switching accounts is not supported on this system yet.");
+        println!("Switching accounts is not supported on this system yet.\n");
+    }
+    let name_width = roster.slots.iter().map(|s| s.label().chars().count()).max().unwrap_or(0);
+    let alias_width =
+        roster.slots.iter().filter_map(|s| s.alias.as_ref()).map(|a| a.chars().count()).max().unwrap_or(0);
+    for s in &roster.slots {
+        let state = if signed_in == Some(s.account.as_str()) {
+            "signed in".to_string()
+        } else if let Some(kept) = found.saved(&s.account) {
+            let stale = if kept.stale() { " (may ask to sign in again)" } else { "" };
+            format!("kept, used {}{stale}", report::ago(kept.set_aside_at))
+        } else {
+            "sign in once to switch here (`cc-same add`)".to_string()
+        };
+        let state = if s.disabled { format!("{state}, sits out") } else { state };
+        let used = usage_text(usage.get(&s.account), now);
+        let alias = s.alias.clone().unwrap_or_default();
+        let line = format!("  {:>2}  {:name_width$}  {alias:alias_width$}  {state:<30}  {used}", s.number, s.label());
+        println!("{}", line.trim_end());
+    }
+    let others: Vec<String> = known_accounts(ctx, &roster)
+        .into_iter()
+        .filter(|(id, _)| roster.slot(id).is_none())
+        .map(|(_, name)| name)
+        .collect();
+    if !others.is_empty() {
+        println!("\nAlso in your sessions: {} (sign in to them once in Claude to add them).", others.join(", "));
+    }
+    Ok(())
+}
+
+fn switch(ctx: &Ctx, account: Option<&str>, strategy: Option<Strategy>, json: bool) -> Result<()> {
+    let roster = accounts::observe(ctx);
+    let found = logins::list(ctx);
+    let target = match account {
+        Some(query) => named(ctx, &roster, query)?.0,
+        None => {
+            let usage = accounts::usage(ctx, &roster);
+            let strategy = strategy.unwrap_or_default();
+            let can_switch = |s: &Slot| found.saved(&s.account).is_some();
+            let current = found.signed_in.as_deref();
+            match accounts::pick(&roster, current, strategy, can_switch, &usage, fsx::now_secs()) {
+                Some(slot) => slot.account.clone(),
+                None => return Err(accounts::Refused::NoOther.into()),
+            }
+        }
+    };
+    let name = name_in(&roster, &target);
+    if found.signed_in.as_deref() == Some(target.as_str()) {
+        if json {
+            let out = serde_json::json!({ "schemaVersion": 1, "switched": false, "to": target, "reason": "already-signed-in" });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        } else {
+            println!("Claude is already signed in to {name}.");
+        }
+        return Ok(());
+    }
+    let done = accounts::switch(ctx, &target, &quit_watch())?;
+    if json {
+        let out = serde_json::json!({
+            "schemaVersion": 1, "switched": true, "from": done.from, "to": done.to, "launched": done.launched,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    let restarted = if done.launched { " (restarted)" } else { "" };
+    println!("Claude is signed in to {name}{restarted}.");
+    Ok(())
+}
+
+/// Claude asks before it quits when it has work in progress: say so, and what Ctrl-C does then.
+fn quit_watch() -> desktop::Watch<'static> {
+    fn tell(quitting: Quitting) {
+        match quitting {
+            Quitting::Asked => {}
+            Quitting::Confirming => eprintln!(
+                "Claude is asking whether to stop its work in progress: answer it in Claude. (Ctrl-C stops waiting; nothing changes.)"
+            ),
+            Quitting::AfterWork => eprintln!(
+                "Claude quits once its work in progress is done, and CC Same carries on then. (Ctrl-C stops waiting; Claude still quits then.)"
+            ),
+        }
+    }
+    desktop::Watch { progress: Some(&tell), stop: None }
+}
+
+fn add(ctx: &Ctx) -> Result<()> {
+    let switched = accounts::add(ctx, &quit_watch())?;
+    let roster = Roster::load(&ctx.paths);
+    if let Some(from) = &switched.from {
+        let name = name_in(&roster, from);
+        let number = roster.slot(from).map(|s| s.number.to_string()).unwrap_or_else(|| name.clone());
+        println!("Kept {name}: `cc-same switch {number}` brings it back.");
+    }
+    println!("Claude is open on its sign-in page: sign in to the other account there.");
+    println!("To switch later, use `cc-same switch`: Log out in Claude ends a sign-in for good.");
+    Ok(())
+}
+
+fn remove(ctx: &Ctx, query: &str, yes: bool) -> Result<()> {
+    let roster = accounts::observe(ctx);
+    let (id, name) = named(ctx, &roster, query)?;
+    println!("Remove {name} from the list? The sign-in kept for it is forgotten; its sessions stay.");
+    if !yes && !confirm("Remove it?") {
+        return Ok(());
+    }
+    accounts::remove(ctx, &id)?;
+    println!("Removed {name}. Sign in to it in Claude to add it again.");
+    Ok(())
+}
+
+fn alias(ctx: &Ctx, account: Option<&str>, name: Option<&str>, unset: bool) -> Result<()> {
+    let roster = accounts::observe(ctx);
+    let Some(query) = account else {
+        let aliased: Vec<&Slot> = roster.slots.iter().filter(|s| s.alias.is_some()).collect();
+        if aliased.is_empty() {
+            println!("No aliases yet: `cc-same alias <account> <name>`.");
+        }
+        for s in aliased {
+            println!("  {:<12}  {}  {}", s.alias.as_deref().unwrap_or_default(), s.number, s.label());
+        }
+        return Ok(());
+    };
+    let (id, label) = named(ctx, &roster, query)?;
+    if unset {
+        accounts::set_alias(ctx, &id, None)?;
+        println!("{label} has no alias now.");
+    } else if let Some(name) = name {
+        let roster = accounts::set_alias(ctx, &id, Some(name))?;
+        let alias = roster.slot(&id).and_then(|s| s.alias.clone()).unwrap_or_default();
+        println!("{label} is also {alias}: `cc-same switch {alias}`.");
+    } else {
+        match roster.slot(&id).and_then(|s| s.alias.as_deref()) {
+            Some(alias) => println!("{alias}"),
+            None => println!("{label} has no alias."),
+        }
+    }
+    Ok(())
+}
+
+fn sit_out(ctx: &Ctx, query: &str, disabled: bool) -> Result<()> {
+    let roster = accounts::observe(ctx);
+    let (id, name) = named(ctx, &roster, query)?;
+    accounts::set_disabled(ctx, &id, disabled)?;
+    if disabled {
+        println!("{name} sits out of the rotation; `cc-same switch {query}` still switches to it.");
+    } else {
+        println!("{name} is back in the rotation.");
+    }
+    Ok(())
+}
+
+fn move_account(ctx: &Ctx, query: &str, number: u32) -> Result<()> {
+    let roster = accounts::observe(ctx);
+    let (id, name) = named(ctx, &roster, query)?;
+    let old = roster.slot(&id).map(|s| s.number);
+    let swapped = accounts::move_to(ctx, &id, number)?;
+    println!("{name} is number {number} now.");
+    if let (Some(other), Some(old)) = (swapped, old) {
+        println!("{} took number {old}.", name_in(&roster, &other));
     }
     Ok(())
 }

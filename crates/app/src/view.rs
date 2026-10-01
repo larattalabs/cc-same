@@ -4,12 +4,13 @@
 
 use crate::hero;
 use crate::i18n::{t, tf, tn};
-use crate::model::{self, Account, Busy, Login, Mood};
+use crate::model::{self, Account, Busy, Fullness, Login, Mood, PlanUse};
 use crate::settings;
 use crate::store::{Store, StoreEvent, UpdatePhase};
 use crate::theme;
 use crate::update::{self, Release};
 use cc_same_core::Surface;
+use cc_same_core::desktop::Quitting;
 use cc_same_core::report::Warning;
 use cc_same_core::retention::Limit;
 use cc_same_core::snapshot::Manifest;
@@ -25,6 +26,7 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::{TextView, TextViewStyle};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Theme, TitleBar, WindowExt as _, h_flex, v_flex,
 };
@@ -271,24 +273,32 @@ impl UniApp {
         });
     }
 
-    /// Ask, then delete the sign-in kept for an account.
-    fn confirm_forget(&mut self, account: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Ask, then take an account off the list (forgetting the sign-in kept for it).
+    pub fn confirm_remove(&mut self, account: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (store, account) = (store.clone(), account.clone());
             alert
-                .title(tf("forget.title", &[("account", &name)]))
-                .description(t("forget.body"))
+                .title(tf("remove.title", &[("account", &name)]))
+                .description(t("remove.body"))
                 .confirm()
-                .ok_text(t("forget.ok"))
+                .ok_text(t("remove.ok"))
                 .cancel_text(t("dialog.cancel"))
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, _, cx| {
                     let account = account.clone();
-                    store.update(cx, |store, cx| store.forget_sign_in(account, cx));
+                    store.update(cx, |store, cx| store.remove_account(account, cx));
                     true
                 })
         });
+    }
+
+    /// Ask, then switch Claude to the next account in the list.
+    pub fn confirm_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.store.read(cx).next_account() {
+            Some(next) => self.confirm_switch(next, window, cx),
+            None => show_outcome(&Err(t("switch.no_other")), window, cx),
+        }
     }
 
     fn set_hovered(&mut self, key: Option<SharedString>, cx: &mut Context<Self>) {
@@ -329,7 +339,8 @@ impl UniApp {
             let _ = view.update(cx, |this, cx| this.set_hovered(key, cx));
         });
         let gathered = self.gathered || mood == Mood::Loading;
-        let picture = hero::rings(accounts, mood, self.hovered.as_deref(), gathered, on_hover, window, cx);
+        let syncing: Vec<Account> = accounts.iter().filter(|a| a.has_lists).cloned().collect();
+        let picture = hero::rings(&syncing, mood, self.hovered.as_deref(), gathered, on_hover, window, cx);
 
         // The count rolls up to its value when the window opens, and on to a new one.
         let counted = |n: usize, window: &mut Window, cx: &mut Context<Self>| -> usize {
@@ -540,27 +551,48 @@ impl UniApp {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().truncate().font_weight(FontWeight::MEDIUM).child(a.name.clone()))
                                 .child(
-                                    div()
-                                        .when(!a.broken, |el| el.truncate())
+                                    h_flex()
+                                        .gap_1p5()
+                                        .min_w_0()
+                                        .child(div().truncate().font_weight(FontWeight::MEDIUM).child(a.name.clone()))
+                                        .when_some(a.alias.clone(), |el, alias| {
+                                            el.child(Tag::secondary().xsmall().rounded_full().flex_none().child(alias))
+                                        }),
+                                )
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
                                         .text_size(rems(0.923))
                                         .text_color(if a.broken { theme.danger } else { theme.muted_foreground })
-                                        .child(a.detail()),
+                                        .child(div().when(!a.broken, |el| el.truncate()).child(a.detail()))
+                                        .when_some(a.usage.filter(|_| !a.broken && !a.excluded), |el, usage| {
+                                            el.child(plan_use(&a.id, usage, cx))
+                                        }),
                                 ),
                         )
                         .children(action);
-                    // A sign-in kept for switching can be let go of from the row's menu.
-                    if !matches!(a.login, Login::Saved { .. }) {
-                        return row.into_any_element();
-                    }
+                    // An account in the list can sit out of "Next Account", or leave the list.
+                    let Some(_) = a.number else { return row.into_any_element() };
                     let view = cx.entity().downgrade();
-                    let (id, name) = (a.id.clone(), a.name.clone());
+                    let store = self.store.clone();
+                    let (id, name, in_rotation) = (a.id.clone(), a.name.clone(), !a.sits_out);
+                    let removable = a.login != Login::SignedIn;
                     row.context_menu(move |menu, _, _| {
-                        let (view, id, name) = (view.clone(), id.clone(), name.clone());
-                        menu.item(PopupMenuItem::new(t("account.forget")).on_click(move |_, window, cx| {
+                        let (view, store, id, name) = (view.clone(), store.clone(), id.clone(), name.clone());
+                        let toggle = id.clone();
+                        let menu = menu.item(PopupMenuItem::new(t("account.rotation")).checked(in_rotation).on_click(
+                            move |_, _, cx| {
+                                let account = toggle.clone();
+                                store.update(cx, |store, cx| store.set_in_rotation(account, !in_rotation, cx));
+                            },
+                        ));
+                        if !removable {
+                            return menu;
+                        }
+                        menu.separator().item(PopupMenuItem::new(t("account.remove")).on_click(move |_, window, cx| {
                             let (id, name) = (id.clone(), name.clone());
-                            let _ = view.update(cx, |this, cx| this.confirm_forget(id, name, window, cx));
+                            let _ = view.update(cx, |this, cx| this.confirm_remove(id, name, window, cx));
                         }))
                     })
                     .into_any_element()
@@ -656,12 +688,28 @@ impl UniApp {
         notices
     }
 
-    /// Claude is restarting on its sign-in page, or waiting there for the user to sign in.
+    /// Claude is asking before it quits for a switch, restarting on its sign-in page, or waiting
+    /// there for the user to sign in.
     fn render_sign_in_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (busy, switching_to, signing_in) = {
+        let (busy, switching_to, signing_in, quitting) = {
             let store = self.store.read(cx);
-            (store.busy, store.switching_to.clone(), store.signing_in.clone())
+            (store.busy, store.switching_to.clone(), store.signing_in.clone(), store.quitting())
         };
+        // Claude has work in progress: it asks whether to stop it, or waits for it. Either way the
+        // user decides in Claude, and can stop waiting here (say after choosing Cancel there).
+        if let Some(quitting @ (Quitting::Confirming | Quitting::AfterWork)) = quitting {
+            let (tone, text) = match quitting {
+                Quitting::Confirming => (Tone::Warning, t("quit.confirming")),
+                _ => (Tone::Info, t("quit.after_work")),
+            };
+            let stop = Button::new("stop-waiting")
+                .small()
+                .outline()
+                .label(t("quit.stop"))
+                .on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |store, cx| store.stop_waiting(cx))))
+                .into_any_element();
+            return Some(notice("notice-quitting", tone, text, vec![stop], None, cx));
+        }
         if busy == Some(Busy::Switching) && switching_to.is_none() {
             let spinner = Spinner::new().small().into_any_element();
             return Some(notice("notice-sign-in", Tone::Info, t("signin.restarting"), vec![spinner], None, cx));
@@ -875,6 +923,25 @@ fn skeleton_row(i: usize, cx: &App) -> AnyElement {
                 .child(Skeleton::new().h(rems(0.8)).w(rems([9., 11., 7.5][i % 3])).rounded(cx.theme().radius))
                 .child(Skeleton::new().secondary().h(rems(0.7)).w(rems(5.5)).rounded(cx.theme().radius)),
         )
+        .into_any_element()
+}
+
+/// "· 7d 58%" after an account's sessions: the fuller window, tinted as the plan fills up; both
+/// windows, and when Claude read them, on hover.
+fn plan_use(id: &str, usage: PlanUse, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let color = match usage.fullness() {
+        Fullness::Roomy => theme.muted_foreground,
+        Fullness::Nearly => theme.warning,
+        Fullness::Full => theme.danger,
+    };
+    let tip = tf("usage.tip", &[("usage", &usage.text()), ("ago", &crate::i18n::ago(usage.at as f64))]);
+    h_flex()
+        .id(ElementId::Name(format!("usage-{id}").into()))
+        .flex_none()
+        .child(div().px_1().child("·"))
+        .child(div().text_color(color).child(usage.short()))
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
         .into_any_element()
 }
 
