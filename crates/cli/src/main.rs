@@ -142,9 +142,6 @@ enum Cmd {
     Move { account: String, number: u32 },
     /// Show or change settings
     Config {
-        /// `code` or `code,cowork` (local Cowork sessions, experimental)
-        #[arg(long, value_delimiter = ',')]
-        surfaces: Option<Vec<String>>,
         /// Keep an account (or `<account>/<org>`) separate
         #[arg(long, value_name = "ID")]
         exclude: Vec<String>,
@@ -257,16 +254,9 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Disable { account } => sit_out(&ctx, &account, true),
         Cmd::Enable { account } => sit_out(&ctx, &account, false),
         Cmd::Move { account, number } => move_account(&ctx, &account, number),
-        Cmd::Config { surfaces, exclude, include, auto_join, notify } => {
+        Cmd::Config { exclude, include, auto_join, notify } => {
             let mut cfg = ctx.config();
             let before = cfg.clone();
-            if let Some(list) = surfaces {
-                let parsed: Vec<Surface> = list.iter().filter_map(|s| Surface::parse(s)).collect();
-                if parsed.is_empty() {
-                    bail!("--surfaces takes `code` or `code,cowork`");
-                }
-                cfg.surfaces = parsed;
-            }
             for id in exclude {
                 if !cfg.exclude.contains(&id) {
                     cfg.exclude.push(id);
@@ -341,12 +331,7 @@ fn doctor(ctx: &Ctx) -> Result<()> {
     println!("Background sync: {}", service_line(&ov));
     for sv in &ov.surfaces {
         println!();
-        let title = format!("{} sessions ({})", sv.surface.title(), sv.surface.dir_name());
-        if sv.enabled {
-            println!("{title}");
-        } else {
-            println!("{title}  not synced; enable with: cc-same config --surfaces code,cowork");
-        }
+        println!("{} sessions ({})", sv.surface.title(), sv.surface.dir_name());
         for pv in &sv.partitions {
             let mut flags = Vec::new();
             if ov.app.showing(&pv.part) {
@@ -399,7 +384,7 @@ fn doctor(ctx: &Ctx) -> Result<()> {
             println!("{mark} {}", warning_text(w));
         }
     }
-    println!("\nNot synced by design: sidebar groups and order (a server setting of each account), pins, claude.ai chats, projects and memory, cloud sessions, connectors and Remote Control links.");
+    println!("\nNot synced by design: sidebar groups and order (a server setting of each account), pins, Cowork tasks, claude.ai chats, projects and memory, cloud sessions, connectors and Remote Control links.");
     println!("\nIf you sync now:");
     for l in describe_plan(&ov.plan, &ov.labels) {
         println!("{l}");

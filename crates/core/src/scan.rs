@@ -6,15 +6,22 @@ use crate::model::*;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Every `<account>/<org>` folder of a surface, symlinked ones included (flagged).
 pub fn discover(ctx: &Ctx, surface: Surface) -> Vec<Partition> {
-    let root = ctx.paths.surface_root(surface);
-    let mut parts = Vec::new();
-    for acct in sorted_entries(&root) {
+    org_folders(&ctx.paths.surface_root(surface))
+        .into_iter()
+        .map(|(acct, org, path, is_link)| Partition { surface, acct, org, path, is_link })
+        .collect()
+}
+
+/// `<account>/<org>` folders under `root`: account, org, path, and whether a symlink is involved.
+fn org_folders(root: &Path) -> Vec<(String, String, PathBuf, bool)> {
+    let mut out = Vec::new();
+    for acct in sorted_entries(root) {
         let acct_name = acct.file_name().to_string_lossy().into_owned();
         if !is_uuid(&acct_name) || !acct.path().is_dir() {
             continue;
@@ -25,16 +32,11 @@ pub fn discover(ctx: &Ctx, surface: Surface) -> Vec<Partition> {
             if !is_uuid(&org_name) || !org.path().is_dir() {
                 continue;
             }
-            parts.push(Partition {
-                surface,
-                is_link: acct_link || fsx::is_symlink(&org.path()),
-                path: root.join(&acct_name).join(&org_name),
-                acct: acct_name.clone(),
-                org: org_name,
-            });
+            let path = root.join(&acct_name).join(&org_name);
+            out.push((acct_name.clone(), org_name, path, acct_link || fsx::is_symlink(&org.path())));
         }
     }
-    parts
+    out
 }
 
 fn sorted_entries(dir: &Path) -> Vec<fs::DirEntry> {
@@ -185,12 +187,6 @@ pub fn scan_partition(ctx: &Ctx, p: &Partition) -> PartState {
                 continue;
             }
         }
-        if let Some(uuid) = name.strip_prefix("local_").filter(|u| is_uuid(u)) {
-            if p.surface == Surface::Cowork && md.is_dir() {
-                ps.sidecars.insert(uuid.to_string(), e.path());
-                continue;
-            }
-        }
         if name == ARCHIVE_IDX && md.is_file() {
             ps.archive_idx = fsx::read_limited(&e.path(), 8 * 1024 * 1024).ok();
             continue;
@@ -250,7 +246,7 @@ pub fn transcript_index(ctx: &Ctx) -> Option<Arc<HashSet<String>>> {
     result
 }
 
-/// Best-effort email per account id, from Claude Code's CLI login and Cowork records.
+/// Best-effort email per account id, from Claude Code's CLI login and local Cowork records.
 pub fn account_labels(ctx: &Ctx) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     if let Ok(Value::Object(root)) = fsx::read_json(&ctx.paths.claude_json, 64 * 1024 * 1024) {
@@ -264,11 +260,11 @@ pub fn account_labels(ctx: &Ctx) -> BTreeMap<String, String> {
             }
         }
     }
-    for p in discover(ctx, Surface::Cowork) {
-        if labels.contains_key(&p.acct) || p.is_link {
+    for (acct, _, path, is_link) in org_folders(&ctx.paths.cowork_sessions()) {
+        if labels.contains_key(&acct) || is_link {
             continue;
         }
-        let names: Vec<_> = sorted_entries(&p.path)
+        let names: Vec<_> = sorted_entries(&path)
             .into_iter()
             .filter(|e| {
                 let n = e.file_name().to_string_lossy().into_owned();
@@ -280,7 +276,7 @@ pub fn account_labels(ctx: &Ctx) -> BTreeMap<String, String> {
             if let Ok(Value::Object(d)) = fsx::read_json(&e.path(), MAX_RECORD_BYTES) {
                 if let Some(Value::String(email)) = d.get("emailAddress") {
                     if email.contains('@') {
-                        labels.insert(p.acct.clone(), email.clone());
+                        labels.insert(acct.clone(), email.clone());
                         break;
                     }
                 }

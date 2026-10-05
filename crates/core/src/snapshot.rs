@@ -37,8 +37,8 @@ pub fn stamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
-/// Clone every index folder of `surfaces` into a new snapshot. Returns its id.
-pub fn take(ctx: &Ctx, surfaces: &[Surface], reason: &str) -> Result<String> {
+/// Clone every index folder into a new snapshot. Returns its id.
+pub fn take(ctx: &Ctx, reason: &str) -> Result<String> {
     let dir = ctx.paths.snapshots_dir();
     fsx::create_private_dir_all(&dir)?;
     let mut id = format!("{}-{reason}", stamp());
@@ -50,7 +50,7 @@ pub fn take(ctx: &Ctx, surfaces: &[Surface], reason: &str) -> Result<String> {
     let root = dir.join(&id);
     fsx::create_private_dir_all(&root)?;
     let mut saved = Vec::new();
-    for &surface in surfaces {
+    for surface in Surface::ALL {
         for p in scan::discover(ctx, surface) {
             if p.is_link {
                 continue;
@@ -124,7 +124,7 @@ pub fn restore(ctx: &Ctx, id: &str) -> Result<String> {
     let raw = fs::read(root.join("manifest.json")).with_context(|| format!("no such snapshot: {id}"))?;
     let manifest: Manifest = serde_json::from_slice(&raw)?;
     let _lock = Lock::acquire(ctx, Duration::from_secs(30))?;
-    let pre = take(ctx, &Surface::ALL, "pre-restore")?;
+    let pre = take(ctx, "pre-restore")?;
     let stamp = stamp();
     for part in &manifest.partitions {
         let Some(surface) = Surface::parse(&part.surface) else { continue };

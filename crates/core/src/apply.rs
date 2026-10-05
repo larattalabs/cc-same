@@ -169,50 +169,15 @@ fn execute(ctx: &Ctx, a: &Action, stamp: &str) -> Result<bool> {
             let payload = a.payload.as_deref().map(Vec::as_slice).unwrap_or_default();
             Ok(fsx::atomic_write(&target, payload, a.mtime_ns, a.additive)?)
         }
-        ActionKind::TrashRecord | ActionKind::TrashTomb | ActionKind::TrashSidecar => {
+        ActionKind::TrashRecord | ActionKind::TrashTomb => {
             let md = match fs::symlink_metadata(&target) {
                 Ok(md) => md,
                 Err(_) => return Ok(false),
             };
-            if a.kind != ActionKind::TrashSidecar && !md.is_file() {
+            if !md.is_file() {
                 bail!("unexpected file type: {}", target.display());
             }
             fsx::move_path(&target, &trash_target(ctx, &a.part, &a.name, stamp))?;
-            Ok(true)
-        }
-        ActionKind::SyncSidecar => {
-            let ActionExtra::Sidecar { src, copy, remove, meta } = &a.extra else {
-                bail!("sidecar action without data")
-            };
-            fsx::ensure_real_dir(&target, base)?;
-            for rel in copy {
-                let src_f = src.join(rel);
-                let dst_f = target.join(rel);
-                if let Some(parent) = dst_f.parent() {
-                    fsx::ensure_real_dir(parent, base)?;
-                }
-                let Some(m) = meta.get(rel) else { continue };
-                let tmp = fsx::unique_path(dst_f.with_file_name(format!("{}{}", fsx::TMP_PREFIX, std::process::id())));
-                match fsx::clone_file(&src_f, &tmp) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // source vanished; next pass settles it
-                    Err(e) => {
-                        let _ = fs::remove_file(&tmp);
-                        return Err(e.into());
-                    }
-                }
-                let _ = m; // mode and mtime were copied from the source by clone_file
-                if let Err(e) = fs::rename(&tmp, &dst_f) {
-                    let _ = fs::remove_file(&tmp);
-                    return Err(e.into());
-                }
-            }
-            for rel in remove {
-                let f = target.join(rel);
-                if fs::symlink_metadata(&f).is_ok() {
-                    fsx::move_path(&f, &trash_target(ctx, &a.part, &format!("{}/{rel}", a.name), stamp))?;
-                }
-            }
             Ok(true)
         }
     }
@@ -224,12 +189,12 @@ pub fn apply_plan(ctx: &Ctx, mut plan: Plan, state: &mut State, reason: &str) ->
     let mut out = Outcome { deferred: plan.deferred_total(), ..Outcome::default() };
     if !plan.actions.is_empty() {
         if state.baseline.is_none() {
-            let id = snapshot::take(ctx, &Surface::ALL, "baseline")?;
+            let id = snapshot::take(ctx, "baseline")?;
             ctx.log(format!("baseline snapshot: {id}"));
             state.baseline = Some(id);
             state.last_snapshot_at = fsx::now_secs();
         } else if fsx::now_secs() - state.last_snapshot_at > cfg.snapshot_every_seconds {
-            let id = snapshot::take(ctx, &cfg.surfaces, reason)?;
+            let id = snapshot::take(ctx, reason)?;
             ctx.debug(format!("snapshot: {id}"));
             state.last_snapshot_at = fsx::now_secs();
         }

@@ -76,6 +76,11 @@ impl Paths {
         self.user_data.join(surface.dir_name())
     }
 
+    /// Desktop's local Cowork sessions. Not synced; their records name the account's email.
+    pub fn cowork_sessions(&self) -> PathBuf {
+        self.user_data.join("local-agent-mode-sessions")
+    }
+
     pub fn desktop_config(&self) -> PathBuf {
         self.user_data.join("config.json")
     }

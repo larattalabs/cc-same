@@ -33,7 +33,6 @@ pub struct PartitionView {
 #[derive(Clone, Debug)]
 pub struct SurfaceView {
     pub surface: Surface,
-    pub enabled: bool,
     pub partitions: Vec<PartitionView>,
     /// Live sessions across all included partitions.
     pub union: usize,
@@ -112,8 +111,6 @@ pub fn kind_label(a: &Action) -> &'static str {
         ActionKind::TrashTomb => "stale deletion markers",
         ActionKind::WriteCollection => "merged task lists",
         ActionKind::WriteArchiveIdx => "archive hint",
-        ActionKind::SyncSidecar => "Cowork folders",
-        ActionKind::TrashSidecar => "deleted Cowork folders",
     }
 }
 
@@ -155,7 +152,6 @@ pub fn overview(ctx: &Ctx) -> Overview {
     }
     let mut surfaces = Vec::new();
     for surface in Surface::ALL {
-        let enabled = cfg.syncs(surface);
         let parts = scan::discover(ctx, surface);
         if parts.is_empty() {
             continue;
@@ -198,29 +194,25 @@ pub fn overview(ctx: &Ctx) -> Overview {
         if !left.is_empty() {
             warnings.push(Warning::LeftoverFolders { surface, dirs: left });
         }
-        if enabled {
-            let orgs: std::collections::BTreeSet<&str> = included.iter().map(|s| s.part.org.as_str()).collect();
-            if orgs.len() > 1 {
-                warnings.push(Warning::SpansOrgs { surface, orgs: orgs.len() });
-            }
+        let orgs: std::collections::BTreeSet<&str> = included.iter().map(|s| s.part.org.as_str()).collect();
+        if orgs.len() > 1 {
+            warnings.push(Warning::SpansOrgs { surface, orgs: orgs.len() });
         }
-        if enabled && surface == Surface::Code {
-            if let Some(tx) = scan::transcript_index(ctx) {
-                let mut sessions: BTreeMap<&str, Option<&str>> = BTreeMap::new();
-                for s in &included {
-                    for (u, r) in &s.records {
-                        if let Some(d) = &r.data {
-                            sessions.insert(u, d.get("cliSessionId").and_then(Value::as_str));
-                        }
+        if let Some(tx) = scan::transcript_index(ctx) {
+            let mut sessions: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+            for s in &included {
+                for (u, r) in &s.records {
+                    if let Some(d) = &r.data {
+                        sessions.insert(u, d.get("cliSessionId").and_then(Value::as_str));
                     }
                 }
-                let missing = sessions.values().filter(|c| !c.is_some_and(|c| tx.contains(c))).count();
-                if missing > 0 {
-                    warnings.push(Warning::MissingTranscripts { missing, total: sessions.len() });
-                }
+            }
+            let missing = sessions.values().filter(|c| !c.is_some_and(|c| tx.contains(c))).count();
+            if missing > 0 {
+                warnings.push(Warning::MissingTranscripts { missing, total: sessions.len() });
             }
         }
-        surfaces.push(SurfaceView { surface, enabled, partitions: views, union: union.len() });
+        surfaces.push(SurfaceView { surface, partitions: views, union: union.len() });
     }
     let retention = crate::retention::read(&ctx.paths);
     if let (true, Some(days), Some(limited_by)) = (retention.is_short(), retention.desktop_days, retention.limited_by) {

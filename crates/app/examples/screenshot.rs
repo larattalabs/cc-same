@@ -393,7 +393,7 @@ mod mac {
                 json!({"oauthAccount": {"accountUuid": ADA.0, "emailAddress": "ada@lovelace.dev"}}).to_string(),
             )?;
             // Grace's email comes from a Cowork record, like on a real machine.
-            let cowork = paths.user_data.join(Surface::Cowork.dir_name()).join(GRACE.0).join(GRACE.1);
+            let cowork = paths.cowork_sessions().join(GRACE.0).join(GRACE.1);
             fs::create_dir_all(&cowork)?;
             let cw = "7b0c1d2e-3f4a-4b5c-8d6e-7f8091a2b3c4";
             fs::write(

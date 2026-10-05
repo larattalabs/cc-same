@@ -494,7 +494,7 @@ mod tests {
                 ..AppState::default()
             },
             labels: Default::default(),
-            surfaces: vec![SurfaceView { surface: Surface::Code, enabled: true, partitions, union: 201 }],
+            surfaces: vec![SurfaceView { surface: Surface::Code, partitions, union: 201 }],
             plan: PlanView::default(),
             warnings: Vec::new(),
             retention: Default::default(),

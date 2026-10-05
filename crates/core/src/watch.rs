@@ -36,7 +36,7 @@ pub fn fingerprint(ctx: &Ctx, running: bool) -> u64 {
     if let Ok(md) = fs::metadata(ctx.paths.desktop_config()) {
         fsx::mtime_ns(&md).hash(&mut h);
     }
-    for surface in ctx.config().surfaces {
+    for surface in Surface::ALL {
         for p in scan::discover(ctx, surface) {
             p.path.hash(&mut h);
             p.is_link.hash(&mut h);
@@ -66,7 +66,7 @@ pub fn fingerprint(ctx: &Ctx, running: bool) -> u64 {
 /// already names its account and org, so create the folder and let first-join seeding fill it.
 pub fn ensure_active_partition(ctx: &Ctx, app: &crate::model::AppState, state: &State) {
     let cfg = ctx.config();
-    if !app.running || !cfg.auto_join_new || !cfg.syncs(Surface::Code) || state.known(Surface::Code).is_empty() {
+    if !app.running || !cfg.auto_join_new || state.known(Surface::Code).is_empty() {
         return;
     }
     for (acct, org) in &app.pairs {

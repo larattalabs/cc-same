@@ -5,6 +5,13 @@ Settings › Updates.
 
 ## Unreleased
 
+### Removed
+
+- **Cowork sync.** From October 6, 2026, new Cowork tasks on Pro and Max plans run in the cloud,
+  where each account keeps its own and CC Same can't reach them, so the experimental option is
+  gone from Settings and from `cc-same config`. Cowork sessions copied earlier stay where they are,
+  and Code sessions sync as before.
+
 ### Fixed
 
 - **Plan usage could look up to date when it wasn't.** Claude checks an account's plan every 15

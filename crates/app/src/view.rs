@@ -9,7 +9,6 @@ use crate::settings;
 use crate::store::{Store, StoreEvent, UpdatePhase};
 use crate::theme;
 use crate::update::{self, Release};
-use cc_same_core::Surface;
 use cc_same_core::desktop::Quitting;
 use cc_same_core::report::Warning;
 use cc_same_core::retention::Limit;
@@ -506,10 +505,9 @@ impl UniApp {
     }
 
     fn render_accounts(&self, accounts: &[Account], cx: &mut Context<Self>) -> AnyElement {
-        let (loading, cowork, switching) = {
+        let (loading, switching) = {
             let store = self.store.read(cx);
-            let supported = store.overview.as_ref().is_some_and(|o| o.logins.supported);
-            (store.overview.is_none(), store.config().syncs(Surface::Cowork), supported)
+            (store.overview.is_none(), store.overview.as_ref().is_some_and(|o| o.logins.supported))
         };
         let actions: Vec<Option<AnyElement>> = accounts.iter().map(|a| self.account_action(a, cx)).collect();
         let add = switching.then(|| {
@@ -602,9 +600,14 @@ impl UniApp {
         let empty = rows.is_empty();
         v_flex()
             .gap_2()
-            .child(h_flex().px_1().h(px(20.)).justify_between().child(section_label(t("accounts.title"), cx)).child(
-                h_flex().gap_2().when(cowork, |el| el.child(section_label(t("accounts.both"), cx))).children(add),
-            ))
+            .child(
+                h_flex()
+                    .px_1()
+                    .h(px(20.))
+                    .justify_between()
+                    .child(section_label(t("accounts.title"), cx))
+                    .child(h_flex().gap_2().children(add)),
+            )
             .child(surface(cx).p_1().gap_px().children(rows).when(empty, |el| {
                 el.child(
                     div()

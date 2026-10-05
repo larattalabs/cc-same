@@ -94,7 +94,7 @@ cc-same switch [<who>] switch Claude to an account, or the next one (--strategy 
 cc-same add            restart Claude signed out, to add an account (the current one is kept)
 cc-same remove <who>   take an account off the list, forgetting the sign-in kept for it
 cc-same alias <who> <name>, disable <who>, enable <who>, move <who> <number>
-cc-same config         --exclude <account-id>, --surfaces code,cowork, --auto-join off, …
+cc-same config         --exclude <account-id>, --auto-join off, …
 ```
 
 ## What stays in sync
@@ -104,11 +104,11 @@ cc-same config         --exclude <account-id>, --surfaces code,cowork, --auto-jo
 | Local Code sessions: title, archive state, model, permission mode, folder grants, linked PRs, worktrees | ✅ |
 | Deletions (to a trash folder, recoverable) | ✅ |
 | Code scheduled tasks and task suggestions | ✅ |
-| Local Cowork sessions and their files | Optional (experimental) |
 | Transcripts, `CLAUDE.md`, skills, `settings.json`, local MCP servers | Already shared by Claude |
 | Connectors, Remote Control links, published artifacts, pins | Kept per account |
 | Sidebar groups and order | ✗ Synced with each account's server settings, replaced at every sign-in |
 | claude.ai chats, projects, memory, cloud sessions | ✗ Stored in each account in the cloud |
+| Cowork tasks | ✗ On Pro and Max plans, new ones run in the cloud too |
 
 ## How it works
 

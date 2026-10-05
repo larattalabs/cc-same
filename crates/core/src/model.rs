@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,30 +25,21 @@ pub const ACCOUNT_LOCAL_KEYS: &[&str] = &[
     "steeredByRemoteClient",
     "publishedArtifacts", // artifacts belong to the account that published them
     "isStarred",          // pins are star-synced with each account's server settings
-    "emailAddress",       // Cowork: the owning account's email
-    "spaceId",            // Cowork: spaces/projects are per account
-    "userSelectedProjectUuids",
 ];
 pub const ACCOUNT_LOCAL_PREFIXES: &[&str] = &["remoteControl"];
-
-/// Inside a Cowork session folder: files that describe the owning account.
-pub const SIDECAR_ACCOUNT_LOCAL: &[&str] =
-    &[".claude/.claude.json", ".claude/policy-limits.json", ".claude/cache", ".claude/backups", "uploads-tmp"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
     Code,
-    Cowork,
 }
 
 impl Surface {
-    pub const ALL: [Surface; 2] = [Surface::Code, Surface::Cowork];
+    pub const ALL: [Surface; 1] = [Surface::Code];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Surface::Code => "code",
-            Surface::Cowork => "cowork",
         }
     }
 
@@ -56,14 +47,12 @@ impl Surface {
     pub fn dir_name(self) -> &'static str {
         match self {
             Surface::Code => "claude-code-sessions",
-            Surface::Cowork => "local-agent-mode-sessions",
         }
     }
 
     pub fn title(self) -> &'static str {
         match self {
             Surface::Code => "Code",
-            Surface::Cowork => "Cowork",
         }
     }
 
@@ -71,14 +60,12 @@ impl Surface {
     pub fn collections(self) -> &'static [&'static str] {
         match self {
             Surface::Code => &["scheduled-tasks.json", "backlog/tasks.json"],
-            Surface::Cowork => &["scheduled-tasks.json"],
         }
     }
 
     pub fn parse(s: &str) -> Option<Surface> {
         match s.trim() {
             "code" => Some(Surface::Code),
-            "cowork" => Some(Surface::Cowork),
             _ => None,
         }
     }
@@ -162,7 +149,6 @@ pub struct PartState {
     pub records: BTreeMap<String, Record>,
     pub tombs: BTreeMap<String, Tomb>,
     pub collections: BTreeMap<&'static str, Collection>,
-    pub sidecars: BTreeMap<String, PathBuf>,
     pub archive_idx: Option<Vec<u8>>,
     pub unmanaged: Vec<String>,
     pub stale_tmp: Vec<String>,
@@ -176,7 +162,6 @@ impl PartState {
             records: BTreeMap::new(),
             tombs: BTreeMap::new(),
             collections: BTreeMap::new(),
-            sidecars: BTreeMap::new(),
             archive_idx: None,
             unmanaged: Vec::new(),
             stale_tmp: Vec::new(),
@@ -204,15 +189,6 @@ pub enum ActionKind {
     TrashTomb,
     WriteCollection,
     WriteArchiveIdx,
-    SyncSidecar,
-    TrashSidecar,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FileMeta {
-    pub size: u64,
-    pub mtime_ns: i128,
-    pub mode: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -229,12 +205,6 @@ pub enum ActionExtra {
     Collection {
         rel: String,
         prev_base: Option<Value>,
-    },
-    Sidecar {
-        src: PathBuf,
-        copy: Vec<String>,
-        remove: Vec<String>,
-        meta: Arc<HashMap<String, FileMeta>>,
     },
 }
 

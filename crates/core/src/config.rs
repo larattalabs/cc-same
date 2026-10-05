@@ -14,9 +14,6 @@ use std::fs;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
-    /// `code`, and optionally `cowork` (local Cowork sessions, experimental).
-    #[serde(deserialize_with = "de_surfaces")]
-    pub surfaces: Vec<Surface>,
     /// `<account>` or `<account>/<org>` entries that stay separate.
     pub exclude: Vec<String>,
     /// Accounts and orgs that appear later join automatically.
@@ -48,7 +45,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            surfaces: vec![Surface::Code],
             exclude: Vec::new(),
             auto_join_new: true,
             keep_snapshots: 20,
@@ -73,12 +69,7 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
-        let mut cfg: Config =
-            serde_json::from_slice(&raw).with_context(|| format!("cannot parse {}", path.display()))?;
-        if cfg.surfaces.is_empty() {
-            cfg.surfaces = vec![Surface::Code];
-        }
-        Ok(cfg)
+        serde_json::from_slice(&raw).with_context(|| format!("cannot parse {}", path.display()))
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
@@ -89,25 +80,10 @@ impl Config {
         Ok(())
     }
 
-    pub fn syncs(&self, surface: Surface) -> bool {
-        self.surfaces.contains(&surface)
-    }
-
     pub fn is_excluded(&self, acct: &str, org: &str) -> bool {
         let key = format!("{acct}/{org}");
         self.exclude.iter().any(|e| e == acct || *e == key)
     }
-}
-
-fn de_surfaces<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Surface>, D::Error> {
-    let raw = Vec::<String>::deserialize(d)?;
-    let mut out: Vec<Surface> = Vec::new();
-    for s in raw.iter().filter_map(|s| Surface::parse(s)) {
-        if !out.contains(&s) {
-            out.push(s);
-        }
-    }
-    Ok(out)
 }
 
 fn de_number<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
@@ -161,10 +137,14 @@ pub struct PendingRestart {
 
 impl State {
     pub fn load(paths: &Paths) -> State {
-        match fs::read(paths.state_file()) {
+        let mut state: State = match fs::read(paths.state_file()) {
             Ok(raw) => serde_json::from_slice(&raw).unwrap_or_default(),
             Err(_) => State::default(),
-        }
+        };
+        // Up to 0.1.9, local Cowork sessions could be synced too.
+        state.known.retain(|surface, _| Surface::parse(surface).is_some());
+        state.bases.retain(|surface, _| Surface::parse(surface).is_some());
+        state
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {

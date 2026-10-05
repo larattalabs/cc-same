@@ -16,8 +16,7 @@ sessions per **account and organization**:
 
 `<Claude data>` is `~/Library/Application Support/Claude` on macOS, `%APPDATA%\Claude` on
 Windows (the Store build virtualises it as `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`), and
-`~/.config/Claude` on Linux. Local Cowork sessions live in the same shape under
-`local-agent-mode-sessions/`, with a folder per session.
+`~/.config/Claude` on Linux.
 
 An account gets a folder for every organization it is used in. Signing in to another account can
 leave an empty one behind as well: Desktop opens the new account with the organization it
@@ -93,8 +92,6 @@ For every session:
     server sessions owned by an account.
   - `publishedArtifacts`.
   - `isStarred`: pins are star-synced with each account's server settings.
-  - For Cowork: `emailAddress`, `spaceId`, `userSelectedProjectUuids`, and the account files in a
-    session's folder (`.claude/.claude.json`, `policy-limits.json`, caches, `uploads-tmp`).
 
   Each account keeps its own values, and a new copy starts without them. Desktop reads all of
   these with defaults, so absent is safe. `remoteMcpServersConfig` is typically about 97% of a
@@ -299,6 +296,9 @@ such as a team, is left out rather than guessed.
 - **Pins.** They are star-synced with each account's server settings, so they stay per account.
 - **claude.ai chats, projects, memory, cloud Code and Cowork sessions, connectors, routines.**
   These live in each account on Anthropic's servers.
+- **Cowork tasks.** Since October 6, 2026, new Cowork tasks on Pro and Max plans run in the cloud,
+  so they belong to the list above. CC Same leaves local ones (`local-agent-mode-sessions/`) alone
+  as well; it only reads their records to learn each account's email address.
 
 ## Desktop's own importer
 

@@ -4,7 +4,9 @@
 use cc_same_core::apply::{apply_plan, run_sync};
 use cc_same_core::plan::build_plan;
 use cc_same_core::watch::{self, WatchOptions};
-use cc_same_core::{desktop, fsx, snapshot, Config, Ctx, FakeDesktop, LogSink, Partition, Paths, Plan, State, Surface};
+use cc_same_core::{
+    desktop, fsx, scan, snapshot, Config, Ctx, FakeDesktop, LogSink, Partition, Paths, Plan, State, Surface,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,17 +83,13 @@ impl Env {
         self.ctx_with(false, None)
     }
 
-    fn part(&self, p: (&str, &str), surface: Surface) -> PathBuf {
-        let d = self.user_data.join(surface.dir_name()).join(p.0).join(p.1);
+    fn code(&self, p: (&str, &str)) -> PathBuf {
+        let d = self.user_data.join(Surface::Code.dir_name()).join(p.0).join(p.1);
         fs::create_dir_all(&d).unwrap();
         d
     }
 
-    fn code(&self, p: (&str, &str)) -> PathBuf {
-        self.part(p, Surface::Code)
-    }
-
-    fn record_in(&self, surface: Surface, p: (&str, &str), u: &str, mtime_ms: i64, fields: Value) -> PathBuf {
+    fn record(&self, p: (&str, &str), u: &str, mtime_ms: i64, fields: Value) -> PathBuf {
         let mut data = json!({
             "sessionId": format!("local_{u}"), "cliSessionId": format!("cli-{}", &u[..8]),
             "cwd": "/tmp/proj", "originCwd": "/tmp/proj", "title": "t", "isArchived": false,
@@ -101,27 +99,19 @@ impl Env {
         for (k, v) in fields.as_object().unwrap() {
             data[k] = v.clone();
         }
-        let path = self.part(p, surface).join(format!("local_{u}.json"));
+        let path = self.code(p).join(format!("local_{u}.json"));
         fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
         set_mtime(&path, mtime_ms);
         path
-    }
-
-    fn record(&self, p: (&str, &str), u: &str, mtime_ms: i64, fields: Value) -> PathBuf {
-        self.record_in(Surface::Code, p, u, mtime_ms, fields)
     }
 
     fn tomb(&self, p: (&str, &str), id: &str, ts_ms: i64) {
         fs::write(self.code(p).join(format!("deleted_{id}")), ts_ms.to_string()).unwrap();
     }
 
-    fn read_in(&self, surface: Surface, p: (&str, &str), u: &str) -> Value {
-        let path = self.user_data.join(surface.dir_name()).join(p.0).join(p.1).join(format!("local_{u}.json"));
-        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
-    }
-
     fn read(&self, p: (&str, &str), u: &str) -> Value {
-        self.read_in(Surface::Code, p, u)
+        let path = self.user_data.join(Surface::Code.dir_name()).join(p.0).join(p.1).join(format!("local_{u}.json"));
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
     fn exists(&self, p: (&str, &str), name: &str) -> bool {
@@ -583,34 +573,30 @@ fn restore_refuses_while_claude_runs() {
 // ---------------------------------------------------------------------------- Cowork
 
 #[test]
-fn cowork_session_folder_follows_its_record() {
+fn cowork_sessions_are_left_alone() {
     let e = Env::new();
-    let ctx = e.ctx();
-    let mut cfg = ctx.config();
-    cfg.surfaces = vec![Surface::Code, Surface::Cowork];
-    ctx.set_config(cfg);
+    // Up to 0.1.9 a config could ask for Cowork too.
+    fs::create_dir_all(&e.state_dir).unwrap();
+    fs::write(e.paths().config_file(), r#"{"surfaces": ["code", "cowork"]}"#).unwrap();
+    let cowork = |p: (&str, &str)| {
+        let d = e.paths().cowork_sessions().join(p.0).join(p.1);
+        fs::create_dir_all(&d).unwrap();
+        d
+    };
     let x = uid();
-    e.record_in(Surface::Cowork, A, &x, 200_000, json!({"emailAddress": "a@example.com"}));
-    let sa = e.part(A, Surface::Cowork).join(format!("local_{x}"));
-    fs::create_dir_all(sa.join("outputs")).unwrap();
-    fs::create_dir_all(sa.join(".claude").join("projects")).unwrap();
-    fs::write(sa.join("outputs").join("report.md"), "hello").unwrap();
-    fs::write(sa.join(".claude").join(".claude.json"), r#"{"oauthAccount":"A"}"#).unwrap();
-    fs::write(sa.join(".claude").join("projects").join("t.jsonl"), "{}\n").unwrap();
-    let sb = e.part(B, Surface::Cowork).join(format!("local_{x}"));
-    fs::create_dir_all(sb.join(".claude")).unwrap();
-    fs::write(sb.join(".claude").join(".claude.json"), r#"{"oauthAccount":"B"}"#).unwrap();
+    let record = json!({"sessionId": format!("local_{x}"), "emailAddress": "a@example.com"});
+    fs::write(cowork(A).join(format!("local_{x}.json")), record.to_string()).unwrap();
+    fs::create_dir_all(cowork(A).join(format!("local_{x}")).join("outputs")).unwrap();
+    let y = uid();
+    e.record(A, &y, 100_000, json!({}));
+    e.code(B);
+    let b = cowork(B);
+    let ctx = e.ctx();
     e.sync_with(&ctx);
-    assert_eq!(fs::read_to_string(sb.join("outputs").join("report.md")).unwrap(), "hello");
-    assert!(sb.join(".claude").join("projects").join("t.jsonl").exists());
-    assert_eq!(fs::read_to_string(sb.join(".claude").join(".claude.json")).unwrap(), r#"{"oauthAccount":"B"}"#);
-    assert!(e.read_in(Surface::Cowork, B, &x).get("emailAddress").is_none());
-    // an output deleted in A is removed (to trash) in B as well
-    fs::remove_file(sa.join("outputs").join("report.md")).unwrap();
-    e.record_in(Surface::Cowork, A, &x, 300_000, json!({"emailAddress": "a@example.com"}));
-    e.sync_with(&ctx);
-    assert!(!sb.join("outputs").join("report.md").exists());
-    assert!(e.plan(&ctx).is_empty());
+    assert!(e.read(B, &y).is_object());
+    assert_eq!(fs::read_dir(&b).unwrap().count(), 0);
+    // Their records still tell which account is whose.
+    assert_eq!(scan::account_labels(&ctx).get(A.0).map(String::as_str), Some("a@example.com"));
 }
 
 // ---------------------------------------------------------------------------- the agent

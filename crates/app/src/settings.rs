@@ -7,7 +7,6 @@ use crate::store::{Store, UpdatePhase};
 use crate::theme::ThemeChoice;
 use crate::update;
 use crate::view::{UniApp, open_notes};
-use cc_same_core::Surface;
 use cc_same_core::config::Config;
 use cc_same_core::report::Warning;
 use cc_same_core::retention::Limit;
@@ -16,7 +15,6 @@ use gpui_kit::component::button::{Button, ButtonGroup};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -117,15 +115,6 @@ fn body(store: &Entity<Store>, cx: &mut App) -> impl IntoElement {
             t("settings.auto_join"),
             Some(t("settings.auto_join.detail")),
             toggle(store, "auto-join", cfg.auto_join_new, idle, |c, on| c.auto_join_new = on),
-            cx,
-        ),
-        row_tagged(
-            t("settings.cowork"),
-            t("settings.beta"),
-            t("settings.cowork.detail"),
-            toggle(store, "cowork", cfg.syncs(Surface::Cowork), idle, |c, on| {
-                c.surfaces = if on { vec![Surface::Code, Surface::Cowork] } else { vec![Surface::Code] };
-            }),
             cx,
         ),
     ];
@@ -454,24 +443,6 @@ fn row(title: String, detail: Option<String>, control: AnyElement, cx: &App) -> 
         .child(v_flex().flex_1().min_w_0().gap_0p5().child(div().child(title)).when_some(detail, |el, d| {
             el.child(div().text_size(rems(0.846)).line_height(rems(1.2)).text_color(muted).child(d))
         }))
-        .child(control)
-        .into_any_element()
-}
-
-fn row_tagged(title: String, tag: String, detail: String, control: AnyElement, cx: &App) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    h_flex()
-        .gap_3()
-        .px_3()
-        .py_2p5()
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_0p5()
-                .child(h_flex().gap_2().child(title).child(Tag::secondary().small().child(tag)))
-                .child(div().text_size(rems(0.846)).line_height(rems(1.2)).text_color(muted).child(detail)),
-        )
         .child(control)
         .into_any_element()
 }

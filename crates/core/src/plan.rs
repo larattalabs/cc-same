@@ -3,12 +3,11 @@
 use crate::config::State;
 use crate::ctx::Ctx;
 use crate::desktop;
-use crate::fsx;
 use crate::merge::{merge_collection, trivially_empty};
 use crate::model::*;
 use crate::scan;
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 /// Scan every synced surface and plan a sync against the current Desktop state.
@@ -29,7 +28,7 @@ pub fn build_plan(
     let cfg = ctx.config();
     let mut plan = Plan::default();
     let mut scanned = BTreeMap::new();
-    for &surface in &cfg.surfaces {
+    for surface in Surface::ALL {
         let known: BTreeSet<String> = state.known(surface).into_iter().collect();
         let parts: Vec<Partition> = scan::discover(ctx, surface)
             .into_iter()
@@ -137,7 +136,7 @@ pub(crate) fn plan_surface(
     if members.len() < 2 {
         return;
     }
-    let transcripts = if surface == Surface::Code { scan::transcript_index(ctx) } else { None };
+    let transcripts = scan::transcript_index(ctx);
     let mut pl = Planner { surface, app, known, plan };
 
     let mut recs: BTreeMap<&str, Vec<(usize, &Record)>> = BTreeMap::new();
@@ -194,17 +193,6 @@ pub(crate) fn plan_surface(
                     pl.defer(p);
                 }
             }
-            if surface == Surface::Cowork {
-                for s in &members {
-                    if s.sidecars.contains_key(u) {
-                        if pl.can_write(&s.part, false) {
-                            pl.add(Action::new(ActionKind::TrashSidecar, &s.part, format!("local_{u}")));
-                        } else {
-                            pl.defer(&s.part);
-                        }
-                    }
-                }
-            }
             continue;
         }
 
@@ -250,12 +238,6 @@ pub(crate) fn plan_surface(
                 } else {
                     pl.defer(p);
                 }
-            }
-        }
-
-        if surface == Surface::Cowork {
-            if let Some(src) = members[wi].sidecars.get(u) {
-                plan_sidecar(&mut pl, &members, wi, u, src);
             }
         }
     }
@@ -306,38 +288,6 @@ pub(crate) fn plan_surface(
             a.payload = Some(Arc::new(payload));
             pl.add(a);
         }
-    }
-}
-
-fn plan_sidecar(pl: &mut Planner<'_>, members: &[&PartState], wi: usize, uuid: &str, src: &std::path::Path) {
-    let skip = |r: &str| SIDECAR_ACCOUNT_LOCAL.iter().any(|x| r == *x || r.starts_with(&format!("{x}/")));
-    let src_tree = Arc::new(fsx::walk_files(src, &skip));
-    for (i, s) in members.iter().enumerate() {
-        if i == wi {
-            continue;
-        }
-        let dst = s.sidecars.get(uuid);
-        let dst_tree: HashMap<String, FileMeta> = dst.map(|d| fsx::walk_files(d, &skip)).unwrap_or_default();
-        let mut copy: Vec<String> = src_tree
-            .iter()
-            .filter(|(r, m)| dst_tree.get(*r).is_none_or(|d| (d.size, d.mtime_ns) != (m.size, m.mtime_ns)))
-            .map(|(r, _)| r.clone())
-            .collect();
-        let mut remove: Vec<String> = dst_tree.keys().filter(|r| !src_tree.contains_key(*r)).cloned().collect();
-        if copy.is_empty() && remove.is_empty() {
-            continue;
-        }
-        copy.sort();
-        remove.sort();
-        if !pl.can_write(&s.part, dst.is_none()) {
-            pl.defer(&s.part);
-            continue;
-        }
-        let mut a = Action::new(ActionKind::SyncSidecar, &s.part, format!("local_{uuid}"));
-        a.src = Some(members[wi].part.clone());
-        a.additive = dst.is_none();
-        a.extra = ActionExtra::Sidecar { src: src.to_path_buf(), copy, remove, meta: src_tree.clone() };
-        pl.add(a);
     }
 }
 

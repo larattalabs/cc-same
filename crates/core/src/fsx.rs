@@ -266,31 +266,3 @@ pub fn unique_path(base: PathBuf) -> PathBuf {
     }
     unreachable!()
 }
-
-/// Recursively list regular files as `relative/path -> (size, mtime, mode)`, never following
-/// symlinks, skipping our temporary files and anything `skip` rejects.
-pub fn walk_files(
-    root: &Path,
-    skip: &dyn Fn(&str) -> bool,
-) -> std::collections::HashMap<String, crate::model::FileMeta> {
-    let mut out = std::collections::HashMap::new();
-    let mut stack = vec![String::new()];
-    while let Some(rel) = stack.pop() {
-        let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(&rel) };
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
-            if name.starts_with(TMP_PREFIX) || skip(&r) {
-                continue;
-            }
-            let Ok(md) = fs::symlink_metadata(e.path()) else { continue };
-            if md.is_dir() {
-                stack.push(r);
-            } else if md.is_file() {
-                out.insert(r, crate::model::FileMeta { size: md.len(), mtime_ns: mtime_ns(&md), mode: mode(&md) });
-            }
-        }
-    }
-    out
-}
