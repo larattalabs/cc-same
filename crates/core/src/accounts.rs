@@ -242,7 +242,8 @@ pub enum Refused {
     SignedIn,
     /// No other account in the rotation has a sign-in kept.
     NoOther,
-    /// Letters, digits, `-`, `_` and `.`, not only digits, not starting with `-`.
+    /// Letters and digits of any script, `-`, `_` and `.`, at most [`ALIAS_MAX`] of them, not only
+    /// digits, not starting with `-`.
     BadAlias(String),
     AliasTaken {
         alias: String,
@@ -260,7 +261,7 @@ impl std::fmt::Display for Refused {
             }
             Refused::BadAlias(alias) => write!(
                 f,
-                "{alias} cannot be an alias: use letters, digits, `-`, `_` or `.`, not only digits, not starting with `-`"
+                "{alias} cannot be an alias: use up to {ALIAS_MAX} letters, digits, `-`, `_` or `.`, not only digits, not starting with `-`"
             ),
             Refused::AliasTaken { alias, by } => write!(f, "{by} is already called {alias}"),
             Refused::BadNumber => f.write_str("numbers start at 1"),
@@ -270,13 +271,17 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// The longest alias, in characters.
+pub const ALIAS_MAX: usize = 24;
+
 /// An alias as it is kept: lowercase, checked.
 pub fn normalize_alias(alias: &str) -> Result<String, Refused> {
     let alias = alias.trim().to_lowercase();
     let fine = !alias.is_empty()
+        && alias.chars().count() <= ALIAS_MAX
         && !alias.starts_with('-')
-        && !alias.bytes().all(|b| b.is_ascii_digit())
-        && alias.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        && !alias.chars().all(|c| c.is_ascii_digit())
+        && alias.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'));
     if fine {
         Ok(alias)
     } else {
@@ -543,7 +548,10 @@ mod tests {
         mac.kept(BOB, "bob@example.com");
         observe(&mac.ctx);
         assert_eq!(normalize_alias(" Work "), Ok("work".into()));
-        for bad in ["", "12", "-x", "a b", "naïve"] {
+        assert_eq!(normalize_alias("工作"), Ok("工作".into()));
+        assert_eq!(normalize_alias("Ärbeit"), Ok("ärbeit".into()));
+        let long = "x".repeat(ALIAS_MAX + 1);
+        for bad in ["", "12", "-x", "a b", "a/b", long.as_str()] {
             assert!(normalize_alias(bad).is_err(), "{bad}");
         }
         let roster = set_alias(&mac.ctx, BOB, Some("Home")).unwrap();

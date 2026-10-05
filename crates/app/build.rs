@@ -2,6 +2,8 @@ use std::path::Path;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // rust-i18n reads the messages while compiling; without this, editing them alone rebuilds nothing.
+    println!("cargo:rerun-if-changed=locales");
     println!("cargo:rerun-if-env-changed=CC_SAME_SKIP_RESOURCES");
     // `CC_SAME_SKIP_RESOURCES=1` lets `cargo check` run for Windows from another OS.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")

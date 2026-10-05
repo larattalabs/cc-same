@@ -575,7 +575,7 @@ mod tests {
         crate::model::Account {
             id: id.into(),
             name: name.into(),
-            has_email: true,
+            email: Some(name.into()),
             sessions: 0,
             missing: 0,
             open: false,

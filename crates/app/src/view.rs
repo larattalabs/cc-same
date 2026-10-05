@@ -16,6 +16,7 @@ use cc_same_core::snapshot::Manifest;
 use gpui_kit::base::{Easing, Transition, transition};
 use gpui_kit::component::avatar::Avatar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress;
@@ -30,10 +31,10 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Theme, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
-    FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, actions, div, ease_out_quint,
-    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rems,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId,
+    Entity, FocusHandle, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, actions, div,
+    ease_out_quint, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rems,
 };
 use std::rc::Rc;
 use std::sync::Arc;
@@ -176,7 +177,7 @@ impl UniApp {
             Login::Unknown if signing_in => None,
             Login::Unknown => {
                 // Named in the dialog only by an email address, something people can type.
-                let name = a.has_email.then(|| a.name.clone());
+                let name = a.email.clone();
                 Some(
                     Button::new(SharedString::from(format!("sign-in-{}", a.id)))
                         .small()
@@ -232,20 +233,20 @@ impl UniApp {
     /// by mistake, and switching restarts Claude. An account whose sign-in is kept switches; one
     /// without restarts Claude on its sign-in page instead, as its "Sign in" button does.
     pub fn confirm_switch(&mut self, account: String, window: &mut Window, cx: &mut Context<Self>) {
-        let (saved, name, has_email, current) = {
+        let (saved, name, email, current) = {
             let store = self.store.read(cx);
             let Some(overview) = store.overview.as_ref() else { return };
             if store.busy.is_some() || overview.logins.signed_in.as_deref() == Some(account.as_str()) {
                 return;
             }
             let saved = overview.logins.saved(&account).cloned();
-            let has_email = store.accounts().iter().find(|a| a.id == account).map(|a| a.has_email);
-            let has_email = has_email.unwrap_or_else(|| saved.as_ref().is_some_and(|s| s.email.is_some()));
+            let email = store.accounts().into_iter().find(|a| a.id == account).and_then(|a| a.email);
+            let email = email.or_else(|| saved.as_ref().and_then(|s| s.email.clone()));
             let current = overview.logins.signed_in.as_ref().map(|id| store.account_name(id));
-            (saved, store.account_name(&account), has_email, current)
+            (saved, store.account_name(&account), email, current)
         };
         let Some(saved) = saved else {
-            return self.confirm_sign_in(has_email.then_some(name), window, cx);
+            return self.confirm_sign_in(email, window, cx);
         };
         let store = self.store.clone();
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -292,6 +293,82 @@ impl UniApp {
         });
     }
 
+    /// Ask for the name an account goes by in the list (its alias). Empty takes the name away.
+    pub fn open_name(&mut self, account: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, current, others) = {
+            let rows = self.store.read(cx).accounts();
+            let Some(row) = rows.iter().find(|a| a.id == account) else { return };
+            // An account as people know it apart from its name: its email, else its ID.
+            let known_as = |a: &Account| {
+                a.email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &cc_same_core::short(&a.id))]))
+            };
+            let others: Vec<(String, String)> =
+                rows.iter().filter(|a| a.id != account).filter_map(|a| Some((a.alias.clone()?, known_as(a)))).collect();
+            (tf("name.title", &[("account", &known_as(row))]), row.alias.clone(), Rc::new(others))
+        };
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t("name.placeholder")).default_value(current.unwrap_or_default())
+        });
+        let problem = cx.new(|_| None::<String>);
+        // Editing clears the complaint about what was there before.
+        cx.subscribe(&input, {
+            let problem = problem.clone();
+            move |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    problem.update(cx, |problem, cx| {
+                        if problem.take().is_some() {
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+        })
+        .detach();
+        let (store, field) = (self.store.clone(), input.clone());
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let theme = cx.theme();
+            let note = match problem.read(cx) {
+                Some(problem) => div().text_color(theme.danger).child(problem.clone()),
+                None => div()
+                    .text_color(theme.muted_foreground)
+                    .child(tf("name.hint", &[("max", &cc_same_core::accounts::ALIAS_MAX)])),
+            };
+            // Below the description, not in it: the field keeps its own color and line height. The
+            // dialog clips its body, so the field's focus ring needs room above it.
+            let field_and_note = v_flex()
+                .pt_1()
+                .gap_2()
+                // Its default 8 px padding leaves a 20 px line 16 px and cuts off descenders.
+                .child(Input::new(&field).cleanable(true).py_1())
+                .child(note.text_size(rems(0.846)).line_height(rems(1.2)));
+            let (input, problem, store, account, others) =
+                (field.clone(), problem.clone(), store.clone(), account.clone(), others.clone());
+            alert
+                .title(title.clone())
+                .description(t("name.body"))
+                .child(field_and_note)
+                .confirm()
+                .ok_text(t("name.ok"))
+                .cancel_text(t("dialog.cancel"))
+                .on_ok(move |_, window, cx| {
+                    let text = input.read(cx).value();
+                    if let Some(found) = model::name_problem(&text, &others) {
+                        problem.update(cx, |problem, cx| {
+                            *problem = Some(found);
+                            cx.notify();
+                        });
+                        window.refresh();
+                        return false;
+                    }
+                    let name = Some(text.trim().to_string()).filter(|name| !name.is_empty());
+                    let account = account.clone();
+                    store.update(cx, |store, cx| store.set_alias(account, name, cx));
+                    true
+                })
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
     /// Ask, then switch Claude to the next account in the list.
     pub fn confirm_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.store.read(cx).next_account() {
@@ -300,7 +377,8 @@ impl UniApp {
         }
     }
 
-    fn set_hovered(&mut self, key: Option<SharedString>, cx: &mut Context<Self>) {
+    /// The account under the pointer, by ID (screenshots set it as well).
+    pub fn set_hovered(&mut self, key: Option<SharedString>, cx: &mut Context<Self>) {
         if self.hovered != key {
             self.hovered = key;
             cx.notify();
@@ -554,8 +632,20 @@ impl UniApp {
                                         .gap_1p5()
                                         .min_w_0()
                                         .child(div().truncate().font_weight(FontWeight::MEDIUM).child(a.name.clone()))
-                                        .when_some(a.alias.clone(), |el, alias| {
-                                            el.child(Tag::secondary().xsmall().rounded_full().flex_none().child(alias))
+                                        // Naming is in the row's menu too, which people may not
+                                        // find; only accounts in the list have a name to give.
+                                        .when(hovered && a.number.is_some(), |el| {
+                                            let id = a.id.clone();
+                                            el.child(
+                                                Button::new(SharedString::from(format!("name-{}", a.id)))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(gpui_kit::assets::IconName::Pencil)
+                                                    .tooltip(t("account.name_tip"))
+                                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                                        this.open_name(id.clone(), window, cx)
+                                                    })),
+                                            )
                                         }),
                                 )
                                 .child(
@@ -570,7 +660,7 @@ impl UniApp {
                                 ),
                         )
                         .children(action);
-                    // An account in the list can sit out of "Next Account", or leave the list.
+                    // An account in the list can be named, sit out of "Next Account", or leave the list.
                     let Some(_) = a.number else { return row.into_any_element() };
                     let view = cx.entity().downgrade();
                     let store = self.store.clone();
@@ -578,13 +668,18 @@ impl UniApp {
                     let removable = a.login != Login::SignedIn;
                     row.context_menu(move |menu, _, _| {
                         let (view, store, id, name) = (view.clone(), store.clone(), id.clone(), name.clone());
-                        let toggle = id.clone();
-                        let menu = menu.item(PopupMenuItem::new(t("account.rotation")).checked(in_rotation).on_click(
-                            move |_, _, cx| {
-                                let account = toggle.clone();
-                                store.update(cx, |store, cx| store.set_in_rotation(account, !in_rotation, cx));
-                            },
-                        ));
+                        let (naming, namer, toggle) = (id.clone(), view.clone(), id.clone());
+                        let menu = menu
+                            .item(PopupMenuItem::new(t("account.name")).on_click(move |_, window, cx| {
+                                let account = naming.clone();
+                                let _ = namer.update(cx, |this, cx| this.open_name(account, window, cx));
+                            }))
+                            .item(PopupMenuItem::new(t("account.rotation")).checked(in_rotation).on_click(
+                                move |_, _, cx| {
+                                    let account = toggle.clone();
+                                    store.update(cx, |store, cx| store.set_in_rotation(account, !in_rotation, cx));
+                                },
+                            ));
                         if !removable {
                             return menu;
                         }

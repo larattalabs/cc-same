@@ -5,6 +5,7 @@
 
 rust_i18n::i18n!("locales", fallback = "en");
 
+pub mod assets;
 pub mod hero;
 pub mod i18n;
 mod login;
@@ -53,7 +54,7 @@ pub fn window_options(cx: &mut App) -> WindowOptions {
 pub fn run() {
     let ctx = context();
     update::finish(&ctx.paths);
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets).with_quit_mode(QuitMode::Explicit);
+    let app = gpui_kit::application().with_assets(assets::Assets).with_quit_mode(QuitMode::Explicit);
     // Clicking the Dock icon brings the window back.
     app.on_reopen(show_window);
     app.run(move |cx: &mut App| {

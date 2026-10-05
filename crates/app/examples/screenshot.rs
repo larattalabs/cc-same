@@ -67,6 +67,12 @@ mod mac {
         ConfirmRemove,
         /// "Next Account" from the menu bar.
         ConfirmNext,
+        /// Name… from an account's menu.
+        Name(&'static str),
+        /// Name… for Grace, after typing a name with a space in it and pressing Return.
+        NameRefused,
+        /// The pointer rests on an account's row.
+        Hover(&'static str),
     }
 
     /// Where switching accounts stands in a scene.
@@ -204,6 +210,16 @@ mod mac {
             Scene { overlay: Overlay::ConfirmSwitchUnsaved, ..scene("switch-confirm-unsaved-light", Light, in_sync) },
             Scene { overlay: Overlay::ConfirmRemove, ..scene("remove-confirm-light", Light, in_sync) },
             Scene { overlay: Overlay::ConfirmNext, ..scene("next-confirm-dark", Dark, in_sync) },
+            Scene { overlay: Overlay::Name(GRACE.0), ..scene("name-light", Light, in_sync) },
+            Scene { language: "zh-CN", overlay: Overlay::Name(ADA.0), ..scene("zh-CN-name-dark", Dark, named) },
+            Scene { overlay: Overlay::NameRefused, ..scene("name-refused-light", Light, in_sync) },
+            scene("named-light", Light, named),
+            Scene { overlay: Overlay::Hover(GRACE.0), ..scene("hover-light", Light, in_sync) },
+            Scene {
+                language: "zh-CN",
+                overlay: Overlay::Hover(THIRD.0),
+                ..scene("zh-CN-hover-named-dark", Dark, named)
+            },
             Scene { overlay: Overlay::Settings, tall: true, ..scene("settings-tall-light", Light, in_sync) },
             Scene {
                 language: "zh-CN",
@@ -239,7 +255,7 @@ mod mac {
         ];
 
         let text_system = gpui_kit::platform::current_platform(true).text_system();
-        let mut cx = HeadlessAppContext::with_platform(text_system, Arc::new(gpui_kit::assets::Assets), || {
+        let mut cx = HeadlessAppContext::with_platform(text_system, Arc::new(cc_same_app::assets::Assets), || {
             gpui_kit::platform::current_headless_renderer()
         });
         cx.update(|cx| {
@@ -336,6 +352,9 @@ mod mac {
                 Overlay::ConfirmSwitchUnsaved => this.confirm_switch(THIRD.0.into(), window, cx),
                 Overlay::ConfirmRemove => this.confirm_remove(GRACE.0.into(), "grace@hopper.work".into(), window, cx),
                 Overlay::ConfirmNext => this.confirm_next(window, cx),
+                Overlay::Name(account) => this.open_name(account.into(), window, cx),
+                Overlay::NameRefused => this.open_name(GRACE.0.into(), window, cx),
+                Overlay::Hover(account) => this.set_hovered(Some(account.into()), cx),
                 Overlay::SettingsToast => {
                     this.open_settings(window, cx);
                     let message = i18n::tf("update.up_to_date", &[("version", &update::VERSION)]);
@@ -349,6 +368,16 @@ mod mac {
             })
         })?;
         settle(cx, window.into())?;
+        if let Overlay::NameRefused = overlay {
+            // One key at a time, as typing does, so each edit is seen before the next key.
+            for key in ["m", "y", "space", "w", "o", "r", "k", "enter"] {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.dispatch_keystroke(gpui_kit::Keystroke::parse(key).expect("a key"), cx);
+                })?;
+                cx.run_until_parked();
+            }
+            settle(cx, window.into())?;
+        }
         cx.capture_screenshot(window.into())?.save(path)?;
         println!("{}", path.display());
         cx.update_window(window.into(), |_, window, _| window.remove_window())?;
@@ -462,19 +491,18 @@ mod mac {
                     set_aside_at: now - 2.0 * 86_400.0,
                 }],
             };
-            // Ada and Grace are in the list; Ada goes by "work". Claude last read Grace's plan the
-            // day before yesterday, near the end of her week.
-            let slot = |number: u32, p: (&str, &str), email: &str, alias: Option<&str>| Slot {
+            // Ada and Grace are in the list. Claude last read Grace's plan the day before yesterday,
+            // near the end of her week.
+            let slot = |number: u32, p: (&str, &str), email: &str| Slot {
                 number,
                 account: p.0.into(),
                 email: Some(email.into()),
-                alias: alias.map(str::to_string),
                 orgs: vec![p.1.into()],
                 ..Slot::default()
             };
             ov.roster = Roster {
                 version: 1,
-                slots: vec![slot(1, ADA, "ada@lovelace.dev", Some("work")), slot(2, GRACE, "grace@hopper.work", None)],
+                slots: vec![slot(1, ADA, "ada@lovelace.dev"), slot(2, GRACE, "grace@hopper.work")],
             };
             ov.usage = [
                 (ADA.0.to_string(), Usage { at: now - 120.0, five_hour: Some(12.0), weekly: Some(58.0) }),
@@ -570,6 +598,23 @@ mod mac {
         fs::create_dir_all(&parent).unwrap();
         std::os::unix::fs::symlink(s.part(ADA), parent.join(THIRD.1)).unwrap();
         Some(s.overview())
+    }
+
+    /// Ada goes by "work"; the third account joined the list without an email CC Same could find,
+    /// and goes by "studio".
+    fn named(s: &Sample) -> Option<Overview> {
+        let mut ov = in_sync(s)?;
+        if let Some(ada) = ov.roster.slots.iter_mut().find(|slot| slot.account == ADA.0) {
+            ada.alias = Some("work".into());
+        }
+        ov.roster.slots.push(Slot {
+            number: 3,
+            account: THIRD.0.into(),
+            alias: Some("studio".into()),
+            orgs: vec![THIRD.1.into()],
+            ..Slot::default()
+        });
+        Some(ov)
     }
 
     fn excluded(s: &Sample) -> Option<Overview> {

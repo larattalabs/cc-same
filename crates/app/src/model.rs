@@ -97,9 +97,10 @@ pub enum Busy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
     pub id: String,
-    /// The email, or `Account 1a2b3c4d` when we do not know it.
+    /// What the window calls it: the name it was given, else its email, else `Account 1a2b3c4d`.
     pub name: String,
-    pub has_email: bool,
+    /// Its email, when CC Same could find one: what to type on Claude's sign-in page.
+    pub email: Option<String>,
     pub sessions: usize,
     /// Sessions the others have and this one does not, yet.
     pub missing: usize,
@@ -113,6 +114,7 @@ pub struct Account {
     /// Its number in the list of accounts to switch between; none until Claude has been seen
     /// signed in to it.
     pub number: Option<u32>,
+    /// The name it was given in the list (`cc-same alias`, or the pencil beside its name).
     pub alias: Option<String>,
     /// Left out of "Next Account".
     pub sits_out: bool,
@@ -223,9 +225,14 @@ pub enum Login {
 }
 
 impl Account {
+    /// Known by more than its ID: an email or a name.
+    fn named(&self) -> bool {
+        self.email.is_some() || self.alias.is_some()
+    }
+
     /// One or two characters for the ring and the avatar.
     pub fn initials(&self) -> String {
-        if self.has_email {
+        if self.named() {
             self.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()
         } else {
             self.id.chars().take(2).collect::<String>().to_uppercase()
@@ -305,10 +312,14 @@ pub fn accounts(ov: &Overview) -> Vec<Account> {
             .find_map(|p| p.email.clone())
             .or_else(|| slot.and_then(|s| s.email.clone()))
             .or_else(|| logins.saved(acct).and_then(|s| s.email.clone()));
+        let alias = slot.and_then(|s| s.alias.clone());
         let open = ov.app.open_account.as_deref() == Some(acct);
         Account {
-            name: email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(acct))])),
-            has_email: email.is_some(),
+            name: alias
+                .clone()
+                .or_else(|| email.clone())
+                .unwrap_or_else(|| tf("account.unnamed", &[("id", &short(acct))])),
+            email,
             sessions: shown.map_or(0, |p| p.sessions),
             missing: shown.filter(|p| !p.excluded).map_or(0, |p| p.missing),
             open,
@@ -316,7 +327,7 @@ pub fn accounts(ov: &Overview) -> Vec<Account> {
             broken: lists.iter().any(|p| p.error.is_some() || p.part.is_link),
             login: login(acct),
             number: slot.map(|s| s.number),
-            alias: slot.and_then(|s| s.alias.clone()),
+            alias,
             sits_out: slot.is_some_and(|s| s.disabled),
             usage: ov.usage.get(acct).and_then(|u| PlanUse::of(u, now, open)),
             has_lists: !lists.is_empty(),
@@ -332,10 +343,25 @@ pub fn accounts(ov: &Overview) -> Vec<Account> {
     // The list by number; then named accounts, the ones we only know by id, and excluded ones.
     rows.sort_by(|a, b| {
         let key =
-            |r: &Account| (r.number.is_none(), r.number, r.excluded, !r.has_email, r.name.to_lowercase(), r.id.clone());
+            |r: &Account| (r.number.is_none(), r.number, r.excluded, !r.named(), r.name.to_lowercase(), r.id.clone());
         key(a).cmp(&key(b))
     });
     rows
+}
+
+/// What keeps `text` from being an account's name, given the names the other accounts go by
+/// (`(name, account)` pairs); `None` when it can be saved. Empty text takes the name away.
+pub fn name_problem(text: &str, others: &[(String, String)]) -> Option<String> {
+    use cc_same_core::accounts::{ALIAS_MAX, normalize_alias};
+    if text.trim().is_empty() {
+        return None;
+    }
+    match normalize_alias(text) {
+        Err(_) => Some(tf("name.invalid", &[("max", &ALIAS_MAX)])),
+        Ok(name) => {
+            others.iter().find(|(n, _)| *n == name).map(|(_, account)| tf("name.taken", &[("account", account)]))
+        }
+    }
 }
 
 pub fn agent_alive(ov: &Overview) -> bool {
@@ -433,7 +459,7 @@ mod tests {
         Account {
             id: "9e31ea7e-0000-0000-0000-000000000000".into(),
             name: name.into(),
-            has_email,
+            email: has_email.then(|| name.into()),
             sessions: 209,
             missing: 0,
             open: false,
@@ -537,6 +563,40 @@ mod tests {
     }
 
     #[test]
+    fn a_name_takes_the_place_of_the_email() {
+        use cc_same_core::accounts::{Roster, Slot};
+        let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        const CY: &str = "cccccccc-0000-4000-8000-000000000003";
+        let mut ov = two_accounts_in_two_orgs(None);
+        let slot = |number, account: &str, email: Option<&str>, alias: &str| Slot {
+            number,
+            account: account.into(),
+            email: email.map(str::to_string),
+            alias: Some(alias.into()),
+            ..Slot::default()
+        };
+        ov.roster = Roster {
+            version: 1,
+            slots: vec![slot(1, BOB, Some("bob@example.com"), "home"), slot(2, CY, None, "工作")],
+        };
+        let rows = accounts(&ov);
+        let named: Vec<_> = rows.iter().map(|a| (a.name.as_str(), a.initials(), a.email.as_deref())).collect();
+        assert_eq!(named[..2], [("home", "H".into(), Some("bob@example.com")), ("工作", "工".into(), None)]);
+    }
+
+    #[test]
+    fn a_name_is_checked_before_it_is_saved() {
+        let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        let others = [("home".to_string(), "bob@example.com".to_string())];
+        assert_eq!(name_problem("  ", &others), None, "empty takes the name away");
+        assert_eq!(name_problem("Studio", &others), None);
+        assert_eq!(name_problem("Home", &others).as_deref(), Some("bob@example.com already goes by this name."));
+        assert!(name_problem("my work", &others).is_some_and(|p| p.contains("no spaces")));
+    }
+
+    #[test]
     fn the_list_comes_first_in_number_order() {
         use cc_same_core::accounts::{Roster, Slot};
         let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
@@ -559,7 +619,7 @@ mod tests {
         let shown: Vec<_> = rows.iter().map(|a| (a.name.as_str(), a.number, a.has_lists)).collect();
         assert_eq!(
             shown,
-            [("bob@example.com", Some(1), true), ("c@example.com", Some(2), false), ("ada@example.com", None, true)]
+            [("home", Some(1), true), ("c@example.com", Some(2), false), ("ada@example.com", None, true)]
         );
         assert_eq!(rows[0].alias.as_deref(), Some("home"));
         assert_eq!(rows[1].detail(), "No sessions yet");

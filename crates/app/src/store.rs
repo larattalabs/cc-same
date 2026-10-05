@@ -760,6 +760,25 @@ impl Store {
         });
     }
 
+    /// Give an account a name (its alias in the list), or take it away. It only edits the list,
+    /// so unlike the tasks above it does not wait for a switch or a sync to finish.
+    pub fn set_alias(&mut self, account: String, alias: Option<String>, cx: &mut Context<Self>) {
+        let ctx = self.ctx.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { accounts::set_alias(&ctx, &account, alias.as_deref()) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(e) = result {
+                    cx.emit(StoreEvent::Done(Err(format!("{e:#}"))));
+                }
+                this.refresh(cx);
+            });
+        })
+        .detach();
+    }
+
     /// An account's name as the window shows it.
     pub fn account_name(&self, id: &str) -> String {
         if let Some(account) = self.accounts().into_iter().find(|a| a.id == id) {

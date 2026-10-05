@@ -253,9 +253,10 @@ Same kept sign-ins, are shown apart until Claude signs in to them once more.
   after the account in use that has a sign-in kept, starting over after the last.
   `--strategy next-available` skips accounts whose plan was used up when Claude last read it, and
   `--strategy best` picks the one with the most left.
-- An **alias** (`cc-same alias 2 work`) is a lowercase name of letters, digits, `-`, `_` and `.`,
-  not only digits; anywhere an account is named, its number, alias, email or the start of its ID
-  works.
+- An **alias** (`cc-same alias 2 work`, or the pencil beside an account's name in the window) is a
+  lowercase name of up to 24 letters of any script, digits, `-`, `_` and `.`, not only digits. The
+  window shows it in place of the email (or of the ID, when CC Same doesn't know the email).
+  Anywhere an account is named, its number, alias, email or the start of its ID works.
 - An account can **sit out** of Next Account (`cc-same disable`, or the check mark in its row's
   menu) and still be switched to by name, or **move** to another number (`cc-same move`), trading
   places with the account that had it.

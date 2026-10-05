@@ -5,6 +5,14 @@ Settings › Updates.
 
 ## Unreleased
 
+### Added
+
+- **Name an account**: point at it in the window and click the pencil beside its name (or
+  right-click it and choose **Name…**). The list then shows that name instead of the email, or
+  instead of the ID of an account whose email CC Same can't find; a name given with
+  `cc-same alias` now shows the same way, rather than in a tag beside the email. Names can use
+  letters of any script, like 工作 (up to 24 characters), and the command line takes them too.
+
 ### Removed
 
 - **Cowork sync.** From October 6, 2026, new Cowork tasks on Pro and Max plans run in the cloud,
