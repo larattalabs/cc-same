@@ -3,6 +3,17 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Fixed
+
+- **Plan usage could look up to date when it wasn't.** Claude checks an account's plan every 15
+  minutes while it runs, but since Desktop 2.19675 Anthropic can pause those checks until Claude's
+  menu in the menu bar (or system tray) has been opened in the last day, so a reading could be a
+  day old. A reading older than half an hour now shows its age, in the window and in the menu bar.
+  For the account Claude is signed in to, a 5-hour reading that old shows as unknown, and pointing
+  at it tells you how to have Claude check again.
+
 ## 0.1.9 - 2026-10-01
 
 ### Changed

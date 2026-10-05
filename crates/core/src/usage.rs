@@ -1,10 +1,15 @@
 //! How much of each account's plan is used, from Claude Desktop's own record.
 //!
-//! While it runs, Desktop asks claude.ai how much of the open organization's plan is used, every
-//! few minutes, and keeps the answers for 30 days in `plan-usage-history.json`: one sample per
-//! answer, labelled with the organization (`fh` is the 5-hour window and `sd` the weekly one, in
-//! percent). CC Same only reads that file. It never asks Anthropic itself, so it needs no sign-in
-//! and no token, and an account's numbers are as fresh as the last time Claude used it.
+//! While it runs, Desktop asks claude.ai how much of the open organization's plan is used, and
+//! keeps the answers for 30 days in `plan-usage-history.json`: one sample per answer, labelled
+//! with the organization (`fh` is the 5-hour window and `sd` the weekly one, in percent). It asks
+//! when it starts, when the account changes, when its menu bar menu opens (a right-click on its
+//! icon), and every 15 minutes in between. Since October 2026 (Desktop 2.19675) a switch on
+//! Anthropic's side can pause those in-between checks until the menu has been opened in the last
+//! 24 hours (`[plan-usage] background poll paused: tray not opened recently` in `main.log`), so
+//! even the open account's numbers can be a day old. CC Same only reads that file. It never asks
+//! Anthropic itself, so it needs no sign-in and no token, and an account's numbers are as fresh as
+//! the last time Claude asked.
 //!
 //! A sample names an organization, not an account. Desktop only gets an answer for an
 //! organization the signed-in account belongs to, so the samples taken after an account loads
@@ -20,6 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The 5-hour window reopens five hours after it starts at the latest.
 pub const FIVE_HOURS: f64 = 5.0 * 3600.0;
 pub const WEEK: f64 = 7.0 * 86_400.0;
+/// Desktop checks every 15 minutes while it checks at all, so an older reading of the open
+/// account means it has stopped.
+pub const FRESH: f64 = 30.0 * 60.0;
 
 /// One answer Desktop recorded.
 #[derive(Clone, Debug, PartialEq)]

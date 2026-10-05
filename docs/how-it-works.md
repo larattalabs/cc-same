@@ -268,12 +268,21 @@ Same kept sign-ins, are shown apart until Claude signs in to them once more.
 
 ### Plan usage
 
-While it runs, Desktop asks claude.ai how much of the open organization's plan is used, every few
-minutes, and keeps the answers for 30 days in `plan-usage-history.json` (`fh` is the 5-hour window
-and `sd` the weekly one, in percent). CC Same shows the newest answer for each account. It never
-asks Anthropic itself, so an account's numbers are as fresh as the last time Claude used it: a
-5-hour reading older than five hours counts as a window that has started over, and a weekly one
-older than a week is not shown.
+While it runs, Desktop asks claude.ai how much of the open organization's plan is used, and keeps
+the answers for 30 days in `plan-usage-history.json` (`fh` is the 5-hour window and `sd` the
+weekly one, in percent). It asks when it starts, when the account changes, when its menu bar menu
+opens (a right-click on its icon), and every 15 minutes in between. Since October 2026 (Desktop
+2.19675) a switch on Anthropic's side can pause those in-between checks until the menu has been
+opened in the last 24 hours: `main.log` then says `[plan-usage] background poll paused: tray not
+opened recently`, and even the open account's numbers stand still until Claude restarts, switches
+accounts or its menu opens.
+
+CC Same shows the newest answer for each account. It never asks Anthropic itself, so an account's
+numbers are as fresh as the last time Claude asked: a reading older than half an hour shows its
+age (for the account Claude is signed in to, with how to have Claude check again), a 5-hour
+reading older than five hours counts as a window that has started over (or as unknown for the
+account Claude is signed in to, which may be filling a new one), and a weekly one older than a
+week is not shown.
 
 The samples name an organization, not an account. Desktop only gets an answer for an organization
 the signed-in account belongs to, so the samples taken after an account loads (the time of its

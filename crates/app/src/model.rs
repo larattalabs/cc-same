@@ -125,12 +125,17 @@ pub struct Account {
 /// What an account last used of its plan, when Claude last read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanUse {
-    /// Percent of the 5-hour window; 0 once the reading is older than the window.
+    /// Percent of the 5-hour window; 0 once the reading is older than the window, unless the
+    /// account is in use (then the window it is filling now is unknown).
     pub five_hour: Option<u32>,
     /// Percent of the weekly window, while the reading is less than a week old.
     pub weekly: Option<u32>,
     /// When Claude read it (Unix seconds).
     pub at: i64,
+    /// Older than Claude's checks of the open account: shown with its age.
+    pub stale: bool,
+    /// Claude is signed in to the account, so it goes on using the plan while the reading ages.
+    pub in_use: bool,
 }
 
 /// How full a plan is.
@@ -144,11 +149,32 @@ pub enum Fullness {
 }
 
 impl PlanUse {
-    pub fn of(usage: &cc_same_core::usage::Usage, now: f64) -> Option<PlanUse> {
+    pub fn of(usage: &cc_same_core::usage::Usage, now: f64, in_use: bool) -> Option<PlanUse> {
+        use cc_same_core::usage::{FIVE_HOURS, FRESH};
         let percent = |p: f64| p.clamp(0., 999.).round() as u32;
-        let five_hour = usage.five_hour_at(now).map(percent);
+        let age = now - usage.at;
+        let five_hour = if in_use && age > FIVE_HOURS { None } else { usage.five_hour_at(now).map(percent) };
         let weekly = usage.weekly_at(now).map(percent);
-        (five_hour.is_some() || weekly.is_some()).then_some(PlanUse { five_hour, weekly, at: usage.at as i64 })
+        (five_hour.is_some() || weekly.is_some()).then_some(PlanUse {
+            five_hour,
+            weekly,
+            at: usage.at as i64,
+            stale: age > FRESH,
+            in_use,
+        })
+    }
+
+    /// How long ago Claude read it, once that is older than its checks.
+    pub fn age(&self) -> Option<String> {
+        self.stale.then(|| crate::i18n::ago(self.at as f64))
+    }
+
+    /// Both windows and, once the reading is old, its age: `5h 12% · 7d 58% · 3 h ago`.
+    pub fn dated(&self) -> String {
+        match self.age() {
+            Some(age) => format!("{} · {age}", self.text()),
+            None => self.text(),
+        }
     }
 
     /// Both windows, `5h 12% · 7d 58%`, in the interface language.
@@ -279,19 +305,20 @@ pub fn accounts(ov: &Overview) -> Vec<Account> {
             .find_map(|p| p.email.clone())
             .or_else(|| slot.and_then(|s| s.email.clone()))
             .or_else(|| logins.saved(acct).and_then(|s| s.email.clone()));
+        let open = ov.app.open_account.as_deref() == Some(acct);
         Account {
             name: email.clone().unwrap_or_else(|| tf("account.unnamed", &[("id", &short(acct))])),
             has_email: email.is_some(),
             sessions: shown.map_or(0, |p| p.sessions),
             missing: shown.filter(|p| !p.excluded).map_or(0, |p| p.missing),
-            open: ov.app.open_account.as_deref() == Some(acct),
+            open,
             excluded: !lists.is_empty() && lists.iter().all(|p| p.excluded),
             broken: lists.iter().any(|p| p.error.is_some() || p.part.is_link),
             login: login(acct),
             number: slot.map(|s| s.number),
             alias: slot.and_then(|s| s.alias.clone()),
             sits_out: slot.is_some_and(|s| s.disabled),
-            usage: ov.usage.get(acct).and_then(|u| PlanUse::of(u, now)),
+            usage: ov.usage.get(acct).and_then(|u| PlanUse::of(u, now, open)),
             has_lists: !lists.is_empty(),
             id: acct.to_string(),
         }
@@ -549,13 +576,21 @@ mod tests {
         rust_i18n::set_locale("en");
         let now = 1_000_000.0;
         let read = |age: f64, five_hour, weekly| cc_same_core::usage::Usage { at: now - age, five_hour, weekly };
-        let fresh = PlanUse::of(&read(60.0, Some(12.4), Some(58.0)), now).unwrap();
+        let fresh = PlanUse::of(&read(60.0, Some(12.4), Some(58.0)), now, true).unwrap();
         assert_eq!((fresh.short().as_str(), fresh.fullness()), ("7d 58%", Fullness::Roomy));
+        assert!(!fresh.stale && fresh.age().is_none());
         // A day on, the 5-hour window has started over; a full week shows as full.
-        let old = PlanUse::of(&read(86_400.0, Some(80.0), Some(100.0)), now).unwrap();
+        let old = PlanUse::of(&read(86_400.0, Some(80.0), Some(100.0)), now, false).unwrap();
         assert_eq!((old.text().as_str(), old.fullness()), ("5h 0% · 7d 100%", Fullness::Full));
+        assert!(old.stale && old.age().is_some());
+        // Unless Claude is signed in to it: then the window it is filling now is unknown.
+        let in_use = PlanUse::of(&read(35.0 * 3600.0, Some(0.0), Some(69.0)), now, true).unwrap();
+        assert_eq!((in_use.text().as_str(), in_use.stale), ("7d 69%", true));
+        assert_eq!(PlanUse::of(&read(4.0 * 3600.0, Some(20.0), None), now, true).unwrap().text(), "5h 20%");
+        // Claude checks every 15 minutes while it checks at all.
+        assert!(!PlanUse::of(&read(20.0 * 60.0, Some(5.0), None), now, true).unwrap().stale);
         // Older than a week, only the 5-hour window is known (to have started over).
-        assert_eq!(PlanUse::of(&read(8.0 * 86_400.0, None, Some(90.0)), now), None);
+        assert_eq!(PlanUse::of(&read(8.0 * 86_400.0, None, Some(90.0)), now, false), None);
         rust_i18n::set_locale("zh-CN");
         assert_eq!(fresh.text(), "5 小时 12% · 7 天 58%");
         rust_i18n::set_locale("en");

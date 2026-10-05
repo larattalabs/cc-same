@@ -130,7 +130,7 @@ fn tray_accounts(
                 None => a.name.clone(),
             };
             if let Some(usage) = a.usage {
-                label = format!("{label}  ({})", usage.text());
+                label = format!("{label}  ({})", usage.dated());
             }
             TrayAccount { id: a.id.clone(), label, current: signed_in == Some(a.id.as_str()) }
         })
@@ -594,17 +594,27 @@ mod tests {
     fn every_account_is_listed_once_by_number() {
         let _locale = crate::i18n::TEST_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
+        let use_of = |weekly, age: f64| {
+            let usage = cc_same_core::usage::Usage {
+                at: cc_same_core::fsx::now_secs() - age,
+                five_hour: Some(30.0),
+                weekly: Some(weekly),
+            };
+            crate::model::PlanUse::of(&usage, cc_same_core::fsx::now_secs(), false)
+        };
+        let mut ada = row("a", "ada@example.com", Some(1));
+        ada.usage = use_of(40.0, 2.5 * 86_400.0);
         let mut bob = row("b", "bob@example.com", Some(2));
-        bob.usage = Some(crate::model::PlanUse { five_hour: Some(0), weekly: Some(99), at: 0 });
-        let rows = [row("a", "ada@example.com", Some(1)), bob, row("c", "Account 0c0c0c0c", None)];
+        bob.usage = use_of(99.0, 60.0);
+        let rows = [ada, bob, row("c", "Account 0c0c0c0c", None)];
         let saved = [("b".to_string(), "bob@example.com".to_string()), ("d".into(), "dan@example.com".into())];
         let list = tray_accounts(&rows, Some("b"), saved);
         let shown: Vec<_> = list.iter().map(|a| (a.label.as_str(), a.current)).collect();
         assert_eq!(
             shown,
             [
-                ("1  ada@example.com", false),
-                ("2  bob@example.com  (5h 0% · 7d 99%)", true),
+                ("1  ada@example.com  (5h 0% · 7d 40% · 2 days ago)", false),
+                ("2  bob@example.com  (5h 30% · 7d 99%)", true),
                 ("Account 0c0c0c0c", false),
                 ("dan@example.com", false),
             ]

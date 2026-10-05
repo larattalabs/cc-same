@@ -926,8 +926,9 @@ fn skeleton_row(i: usize, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// "· 7d 58%" after an account's sessions: the fuller window, tinted as the plan fills up; both
-/// windows, and when Claude read them, on hover.
+/// "· 7d 58%" after an account's sessions: the fuller window, tinted as the plan fills up, and
+/// "· 3 h ago" once Claude has not read it lately; both windows, and when Claude read them, on
+/// hover, with how to have Claude read the open account's again.
 fn plan_use(id: &str, usage: PlanUse, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let color = match usage.fullness() {
@@ -935,13 +936,29 @@ fn plan_use(id: &str, usage: PlanUse, cx: &App) -> AnyElement {
         Fullness::Nearly => theme.warning,
         Fullness::Full => theme.danger,
     };
-    let tip = tf("usage.tip", &[("usage", &usage.text()), ("ago", &crate::i18n::ago(usage.at as f64))]);
+    let hint = usage.stale && usage.in_use;
+    let key = match (hint, cfg!(target_os = "macos")) {
+        (false, _) => "usage.tip",
+        (true, true) => "usage.stale.mac",
+        (true, false) => "usage.stale.other",
+    };
+    let tip = tf(key, &[("usage", &usage.text()), ("ago", &crate::i18n::ago(usage.at as f64))]);
     h_flex()
         .id(ElementId::Name(format!("usage-{id}").into()))
         .flex_none()
         .child(div().px_1().child("·"))
         .child(div().text_color(color).child(usage.short()))
-        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .when_some(usage.age(), |el, age| el.child(div().px_1().child("·")).child(age))
+        .tooltip(move |window, cx| {
+            let tip = tip.clone();
+            // A tooltip is laid out as narrow as its content allows, which for text is one line:
+            // the hint, too long for that, gets a width of its own to wrap in.
+            match hint {
+                true => Tooltip::element(move |_, _| div().max_w(px(280.)).child(tip.clone())),
+                false => Tooltip::new(tip),
+            }
+            .build(window, cx)
+        })
         .into_any_element()
 }
 
