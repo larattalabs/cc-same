@@ -101,8 +101,8 @@ cc-same config         --exclude <account-id>, --auto-join off, --switch-cli on,
 `cc-same config --switch-cli on`, `switch` takes it along: its sign-in is set aside in your login
 keychain and the one kept for the other account is put back. The first time you switch to an
 account, the terminal is signed out instead: run `/login` in `claude` once, to that account, and
-from then on it switches back and forth with Claude. Only the default `~/.claude` is switched
-(not a `CLAUDE_CONFIG_DIR`).
+from then on it switches back and forth with Claude. The sign-ins of MCP servers stay as they are.
+Only the default `~/.claude` is switched (not a `CLAUDE_CONFIG_DIR`).
 
 ## What stays in sync
 

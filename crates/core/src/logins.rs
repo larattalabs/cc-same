@@ -169,7 +169,6 @@ pub fn switch(ctx: &Ctx, target: Target, watch: &desktop::Watch) -> Result<Switc
     }
     recover(&ctx.paths)?;
     let from = desktop::last_known_account(ctx);
-    let mut cli = None;
     if from.is_some() && from == to {
         // Already signed in to it; a copy set aside earlier is out of date.
         if let Some(account) = &to {
@@ -178,19 +177,27 @@ pub fn switch(ctx: &Ctx, target: Target, watch: &desktop::Watch) -> Result<Switc
     } else {
         let email = from.as_ref().and_then(|a| crate::scan::account_labels(ctx).remove(a));
         swap(&ctx.paths, from.as_deref(), to.as_deref(), email)?;
-        if ctx.config().switch_cli {
-            let followed = crate::cli_login::follow(ctx, to.as_deref());
-            if let Err(e) = &followed {
-                ctx.log(format!("switching the command line: {e:#}"));
-            }
-            cli = Some(followed.map_err(|e| format!("{e:#}")));
-        }
     }
+    // Also when Desktop was there already: a command line left behind by an earlier switch
+    // catches up.
+    let cli = follow_cli(ctx, to.as_deref());
     let launched = was_running || to.is_none();
     if launched {
         desktop::launch(ctx)?;
     }
     Ok(Switched { from, to, launched, cli })
+}
+
+/// Bring Claude Code's command line along, when `switchCli` asks for that.
+pub fn follow_cli(ctx: &Ctx, to: Option<&str>) -> Option<Result<crate::cli_login::Followed, String>> {
+    if !ctx.config().switch_cli {
+        return None;
+    }
+    let followed = crate::cli_login::follow(ctx, to);
+    if let Err(e) = &followed {
+        ctx.log(format!("switching the command line: {e:#}"));
+    }
+    Some(followed.map_err(|e| format!("{e:#}")))
 }
 
 /// Delete the sign-in saved for `account`.
@@ -685,7 +692,8 @@ mod tests {
         let keychain = Folder(keychain);
         let user = std::env::var("USER").unwrap_or_default();
         let cli_login = |account: &str| {
-            keychain.set("Claude Code-credentials", &user, &format!("cli tokens of {account}")).unwrap();
+            let item = serde_json::json!({ "claudeAiOauth": { "refreshToken": format!("cli tokens of {account}") } });
+            keychain.set("Claude Code-credentials", &user, &item.to_string()).unwrap();
             let oa = serde_json::json!({ "oauthAccount": { "accountUuid": account } });
             fs::write(&ctx.paths.claude_json, oa.to_string()).unwrap();
         };
@@ -703,8 +711,9 @@ mod tests {
         assert_eq!(cli_on(), None);
         cli_login(GRACE);
         let done = switch(&ctx, Target::Account(ADA), &desktop::Watch::default()).unwrap();
-        assert_eq!(done.cli, Some(Ok(Followed::Switched { from: GRACE.into() })));
-        assert_eq!(cli_on().as_deref(), Some(format!("cli tokens of {ADA}").as_str()));
+        assert_eq!(done.cli, Some(Ok(Followed::Switched { from: Some(GRACE.into()) })));
+        let item: Value = serde_json::from_str(&cli_on().unwrap()).unwrap();
+        assert_eq!(item["claudeAiOauth"]["refreshToken"], format!("cli tokens of {ADA}"));
         assert_eq!(mac.owner(), format!("cookies of {ADA}"));
     }
 

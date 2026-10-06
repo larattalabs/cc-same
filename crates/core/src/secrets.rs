@@ -1,4 +1,4 @@
-//! Where sign-ins that must stay secret are kept: the login keychain on macOS, through Apple's
+//! Where sign-ins that must stay secret are kept: the keychain on macOS, through Apple's
 //! `security` tool, the way Claude Code keeps its own. A folder can stand in for the keychain in
 //! tests and scripts (`CC_SAME_KEYCHAIN_DIR`); without one, a stand-in Claude Desktop never
 //! reaches the real keychain.
@@ -20,10 +20,17 @@ pub trait Secrets {
     fn delete(&self, service: &str, account: &str) -> Result<()>;
 }
 
-/// The keychain to use for `ctx`.
-pub fn open(ctx: &Ctx) -> Result<Box<dyn Secrets>> {
+/// The two places secrets are found: where Claude Code looks for its own item (the keychains it
+/// searches), and where CC Same keeps the sign-ins it sets aside (the login keychain).
+pub struct Stores {
+    pub live: Box<dyn Secrets>,
+    pub kept: Box<dyn Secrets>,
+}
+
+/// The keychains to use for `ctx`.
+pub fn open(ctx: &Ctx) -> Result<Stores> {
     if let Some(dir) = &ctx.paths.keychain_dir {
-        return Ok(Box::new(Folder(dir.clone())));
+        return Ok(Stores { live: Box::new(Folder(dir.clone())), kept: Box::new(Folder(dir.clone())) });
     }
     if ctx.fake.running.is_some() {
         bail!("a stand-in Claude Desktop never uses the real keychain (set CC_SAME_KEYCHAIN_DIR)");
@@ -31,7 +38,8 @@ pub fn open(ctx: &Ctx) -> Result<Box<dyn Secrets>> {
     if !cfg!(target_os = "macos") {
         bail!("the keychain is only used on macOS");
     }
-    Ok(Box::new(Keychain))
+    let login = crate::paths::home().join("Library/Keychains/login.keychain-db");
+    Ok(Stores { live: Box::new(Keychain { file: None }), kept: Box::new(Keychain { file: Some(login) }) })
 }
 
 /// Files in a folder, one per secret: a stand-in for tests and scripts.
@@ -69,10 +77,12 @@ impl Secrets for Folder {
     }
 }
 
-/// The login keychain, through `/usr/bin/security` (by its full path: a `security` earlier on
-/// `PATH` must not see the secrets). Claude Code makes its item with the same tool, so reading it
-/// back asks nothing.
-pub struct Keychain;
+/// A keychain, through `/usr/bin/security` (by its full path: a `security` earlier on `PATH` must
+/// not see the secrets). `file` names one keychain; without it, the user's search list is used,
+/// as Claude Code does for its own item.
+pub struct Keychain {
+    pub file: Option<PathBuf>,
+}
 
 const SECURITY: &str = "/usr/bin/security";
 /// `errSecItemNotFound`.
@@ -81,12 +91,11 @@ const NOT_FOUND: i32 = 44;
 const LINE_LIMIT: usize = 4096 - 64;
 /// A healthy keychain answers in well under a second; a locked one may wait for a password
 /// nobody types.
-const TIMEOUT: Duration = Duration::from_secs(10);
+const TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Output {
     code: Option<i32>,
     stdout: String,
-    stderr: String,
 }
 
 fn security(args: &[&str], stdin: Option<&str>) -> Result<Output> {
@@ -94,7 +103,7 @@ fn security(args: &[&str], stdin: Option<&str>) -> Result<Output> {
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .context("starting security")?;
     if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
@@ -112,12 +121,9 @@ fn security(args: &[&str], stdin: Option<&str>) -> Result<Output> {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let mut out = Output { code: status.code(), stdout: String::new(), stderr: String::new() };
+    let mut out = Output { code: status.code(), stdout: String::new() };
     if let Some(mut p) = child.stdout.take() {
         p.read_to_string(&mut out.stdout)?;
-    }
-    if let Some(mut p) = child.stderr.take() {
-        p.read_to_string(&mut out.stderr)?;
     }
     Ok(out)
 }
@@ -131,21 +137,50 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What `security find-generic-password -w` printed, as the value stored. It prints a value as it
+/// is when every byte is printable, and as hex otherwise (UTF-8 beyond ASCII included). The
+/// secrets kept here are JSON objects, so hex that decodes to one is taken for that.
+fn printed_value(printed: &str) -> String {
+    let printed = printed.strip_suffix('\n').unwrap_or(printed);
+    let is_hex = printed.len() % 2 == 0 && !printed.is_empty() && printed.bytes().all(|b| b.is_ascii_hexdigit());
+    if is_hex {
+        let bytes: Option<Vec<u8>> =
+            (0..printed.len()).step_by(2).map(|i| u8::from_str_radix(&printed[i..i + 2], 16).ok()).collect();
+        if let Some(text) = bytes.and_then(|b| String::from_utf8(b).ok()) {
+            if text.trim_start().starts_with('{') {
+                return text;
+            }
+        }
+    }
+    printed.to_string()
+}
+
+impl Keychain {
+    fn args<'a>(&'a self, args: &[&'a str]) -> Vec<&'a str> {
+        let mut all = args.to_vec();
+        if let Some(file) = self.file.as_ref().and_then(|f| f.to_str()) {
+            all.push(file);
+        }
+        all
+    }
+}
+
 impl Secrets for Keychain {
     fn get(&self, service: &str, account: &str) -> Result<Option<String>> {
-        let out = security(&["find-generic-password", "-a", account, "-s", service, "-w"], None)?;
+        let out = security(&self.args(&["find-generic-password", "-a", account, "-s", service, "-w"]), None)?;
         match out.code {
-            Some(0) => Ok(Some(out.stdout.strip_suffix('\n').unwrap_or(&out.stdout).to_string())),
+            Some(0) => Ok(Some(printed_value(&out.stdout))),
             Some(NOT_FOUND) => Ok(None),
-            code => bail!("reading the keychain failed ({code:?}): {}", out.stderr.trim()),
+            code => bail!("reading the keychain failed ({code:?})"),
         }
     }
 
     fn set(&self, service: &str, account: &str, value: &str) -> Result<()> {
         // The value goes in as hex on standard input: never on a command line, where other
         // programs could read it, and never escaped wrong.
+        let keychain = self.file.as_ref().map(|f| format!(" {}", quote(&f.to_string_lossy()))).unwrap_or_default();
         let line = format!(
-            "add-generic-password -U -a {} -s {} -X {}\n",
+            "add-generic-password -U -a {} -s {} -X {}{keychain}\n",
             quote(account),
             quote(service),
             hex(value.as_bytes())
@@ -155,7 +190,7 @@ impl Secrets for Keychain {
         }
         let out = security(&["-i"], Some(&line))?;
         if out.code != Some(0) {
-            bail!("writing to the keychain failed ({:?}): {}", out.code, out.stderr.trim());
+            bail!("writing to the keychain failed ({:?})", out.code);
         }
         // `security -i` can report success for a command it did not carry out: read it back.
         if self.get(service, account)?.as_deref() != Some(value) {
@@ -165,11 +200,16 @@ impl Secrets for Keychain {
     }
 
     fn delete(&self, service: &str, account: &str) -> Result<()> {
-        let out = security(&["delete-generic-password", "-a", account, "-s", service], None)?;
+        let out = security(&self.args(&["delete-generic-password", "-a", account, "-s", service]), None)?;
         match out.code {
-            Some(0) | Some(NOT_FOUND) => Ok(()),
-            code => bail!("removing from the keychain failed ({code:?}): {}", out.stderr.trim()),
+            Some(0) | Some(NOT_FOUND) => {}
+            code => bail!("removing from the keychain failed ({code:?})"),
         }
+        // A second item with the same name, in another keychain of the list, would still answer.
+        if self.get(service, account)?.is_some() {
+            bail!("the keychain still has another copy of it");
+        }
+        Ok(())
     }
 }
 
@@ -182,6 +222,15 @@ mod tests {
         assert_eq!(quote(r#"Claude Code-credentials"#), r#""Claude Code-credentials""#);
         assert_eq!(quote(r#"a"b\c"#), r#""a\"b\\c""#);
         assert_eq!(hex(b"{\"a\":1}"), "7b2261223a317d");
+    }
+
+    #[test]
+    fn hex_printed_for_non_ascii_values_reads_back_as_the_value() {
+        let value = r#"{"displayName":"José"}"#;
+        assert_eq!(printed_value(&format!("{}\n", hex(value.as_bytes()))), value);
+        assert_eq!(printed_value("{\"a\":1}\n"), "{\"a\":1}");
+        // Hex that is not a JSON object is a value of its own.
+        assert_eq!(printed_value("deadbeef\n"), "deadbeef");
     }
 
     #[test]

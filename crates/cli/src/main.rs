@@ -661,42 +661,57 @@ fn switch(ctx: &Ctx, account: Option<&str>, strategy: Option<Strategy>, json: bo
     };
     let name = name_in(&roster, &target);
     if found.signed_in.as_deref() == Some(target.as_str()) {
+        // Desktop is there; the command line may not be, after an earlier switch that left it.
+        let cli = logins::follow_cli(ctx, Some(&target));
         if json {
-            let out = serde_json::json!({ "schemaVersion": 1, "switched": false, "to": target, "reason": "already-signed-in" });
+            let out = serde_json::json!({
+                "schemaVersion": 1, "switched": false, "to": target, "reason": "already-signed-in",
+                "cli": cli_json(&cli)?,
+            });
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
             println!("Claude is already signed in to {name}.");
+            print_cli(&roster, &name, &cli);
         }
         return Ok(());
     }
     let done = accounts::switch(ctx, &target, &quit_watch())?;
     if json {
-        let cli = match &done.cli {
-            Some(Ok(followed)) => serde_json::to_value(followed)?,
-            Some(Err(e)) => serde_json::json!({ "outcome": "failed", "error": e }),
-            None => serde_json::Value::Null,
-        };
         let out = serde_json::json!({
             "schemaVersion": 1, "switched": true, "from": done.from, "to": done.to, "launched": done.launched,
-            "cli": cli,
+            "cli": cli_json(&done.cli)?,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
     let restarted = if done.launched { " (restarted)" } else { "" };
     println!("Claude is signed in to {name}{restarted}.");
-    match &done.cli {
+    print_cli(&roster, &name, &done.cli);
+    Ok(())
+}
+
+type CliOutcome = Option<Result<Followed, String>>;
+
+fn cli_json(cli: &CliOutcome) -> Result<serde_json::Value> {
+    Ok(match cli {
+        Some(Ok(followed)) => serde_json::to_value(followed)?,
+        Some(Err(e)) => serde_json::json!({ "outcome": "failed", "error": e }),
+        None => serde_json::Value::Null,
+    })
+}
+
+fn print_cli(roster: &Roster, name: &str, cli: &CliOutcome) {
+    match cli {
         Some(Ok(Followed::Switched { .. } | Followed::AlreadyThere)) => {
             println!("So is Claude Code in the terminal.");
         }
         Some(Ok(Followed::SignedOut { from })) => println!(
             "Claude Code in the terminal is signed out, with {}'s sign-in kept: run /login in claude once to sign it in to {name}. From then on it switches along.",
-            name_in(&roster, from)
+            name_in(roster, from)
         ),
         Some(Ok(Followed::Stayed { .. } | Followed::NotSignedIn)) | None => {}
         Some(Err(e)) => println!("Claude Code in the terminal was not switched: {e}"),
     }
-    Ok(())
 }
 
 /// Claude asks before it quits when it has work in progress: say so, and what Ctrl-C does then.

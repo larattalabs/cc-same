@@ -6,6 +6,7 @@ use crate::model::{self, Account, Busy, Mood};
 use crate::theme::ThemeChoice;
 use crate::update::{self, Failure, Problem, Release};
 use cc_same_core::accounts::{self, Refused as ListRefused};
+use cc_same_core::cli_login::Followed;
 use cc_same_core::config::Config;
 use cc_same_core::desktop::{NotReady, Quitting, Watch};
 use cc_same_core::logins::{self, Refused};
@@ -679,7 +680,18 @@ impl Store {
                         Some(account) => {
                             this.signing_in = None;
                             let name = this.account_name(account);
-                            cx.emit(StoreEvent::Done(Ok(tf("toast.switched", &[("account", &name)]))));
+                            let mut said = tf("toast.switched", &[("account", &name)]);
+                            // Claude Code in the terminal, when it switches along.
+                            match &switched.cli {
+                                Some(Ok(Followed::SignedOut { .. })) => {
+                                    said = format!("{said}. {}", tf("toast.cli_signed_out", &[("account", &name)]));
+                                }
+                                Some(Err(error)) => {
+                                    said = format!("{said}. {}", tf("toast.cli_failed", &[("error", error)]));
+                                }
+                                _ => {}
+                            }
+                            cx.emit(StoreEvent::Done(Ok(said)));
                         }
                         None => this.signing_in = Some(SigningIn { previous: switched.from, expected }),
                     },
