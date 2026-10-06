@@ -69,6 +69,7 @@ impl Env {
         p.projects = vec![self.projects.clone()];
         p.claude_settings = self.root.join("claude-settings.json");
         p.claude_json = self.root.join("claude.json");
+        p.synced_plugins = self.root.join("plugins-synced");
         p
     }
 
@@ -728,4 +729,64 @@ fn switching_accounts_while_claude_runs() {
     assert!(e.state_dir.join("agent.json").exists(), "the agent writes a heartbeat");
     stop.store(true, Ordering::Relaxed);
     agent.join().unwrap();
+}
+
+// ---------------------------------------------------------------------------- what stays home
+
+/// Connectors, org plugins and published artifacts stay with their account; the inventory says
+/// which account has which, and what each one lacks.
+#[test]
+fn the_inventory_tells_what_stays_with_each_account() {
+    use cc_same_core::inventory;
+    let e = Env::new();
+    let linear = json!({"name": "Linear", "url": "https://mcp.linear.app/sse", "uuid": "u1", "tools": []});
+    let slack = json!({"name": "Slack", "url": "https://mcp.slack.com", "uuid": "u2", "tools": []});
+    let (x, y, z) = (uid(), uid(), uid());
+    e.record(
+        A,
+        &x,
+        100_000,
+        json!({
+            "remoteMcpServersConfig": [linear.clone(), slack],
+            "publishedArtifacts": [{"url": "https://claude.ai/artifact/one", "title": "One", "updatedAt": 1_000_000}],
+        }),
+    );
+    // Another session lists the same artifact, edited later.
+    e.record(
+        A,
+        &y,
+        100_000,
+        json!({
+            "publishedArtifacts": [
+                {"url": "https://claude.ai/artifact/one", "title": "One, edited", "updatedAt": 2_000_000},
+                {"url": "https://claude.ai/artifact/two", "title": "Two", "updatedAt": 1_500_000},
+            ],
+        }),
+    );
+    e.record(B, &z, 100_000, json!({"remoteMcpServersConfig": [linear]}));
+    let synced = e.root.join("plugins-synced").join(format!("{}_{}", B.1, B.0));
+    fs::create_dir_all(&synced).unwrap();
+    let manifest = json!({"plugins": [{"name": "legal", "marketplaceName": "knowledge-work-plugins"}]});
+    fs::write(synced.join("manifest.json"), manifest.to_string()).unwrap();
+
+    let held = inventory::read(&e.ctx());
+    let a = held.of(A.0).unwrap();
+    assert_eq!(a.connectors.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Linear", "Slack"]);
+    let titles: Vec<_> = a.artifacts.iter().map(|x| x.title.as_deref().unwrap()).collect();
+    assert_eq!(titles, ["One, edited", "Two"]);
+    assert!(a.plugins.is_empty());
+    let b = held.of(B.0).unwrap();
+    assert_eq!(b.plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["legal"]);
+    assert!(b.artifacts.is_empty());
+
+    let missing = held.missing(A.0);
+    assert!(missing.connectors.is_empty());
+    assert_eq!(missing.plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["legal"]);
+    let missing = held.missing(B.0);
+    assert_eq!(missing.connectors.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Slack"]);
+    assert!(missing.plugins.is_empty());
+
+    // A sync copies sessions, never what belongs to an account: the inventory stays as it was.
+    e.sync();
+    assert_eq!(inventory::read(&e.ctx()), held);
 }
