@@ -133,6 +133,7 @@ mod tests {
         Ctx::new(paths, config, FakeDesktop { running: Some(false), active: None }, LogSink::Silent)
     }
 
+    #[cfg(unix)]
     fn wait_for(path: &Path) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
