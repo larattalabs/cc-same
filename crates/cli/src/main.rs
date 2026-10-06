@@ -685,12 +685,12 @@ fn switch(ctx: &Ctx, account: Option<&str>, strategy: Option<Strategy>, json: bo
     println!("Claude is signed in to {name}{restarted}.");
     if let (Some(from), true) = (&done.from, left_behind > 0) {
         println!(
-            "The {left_behind} artifact(s) published from {} stay with it: {name} can update them only once they are shared with it.",
+            "The {left_behind} artifact(s) published from {} stay with it: {name} can update one only once it is shared with {name} with edit access.",
             name_in(&roster, from)
         );
     }
     for line in missing_lines(&missing) {
-        println!("Not set up on {name} yet: {line}");
+        println!("Not seen on {name} yet: {line}");
     }
     Ok(())
 }
@@ -710,7 +710,8 @@ fn missing_lines(missing: &inventory::Missing) -> Vec<String> {
 }
 
 fn show_inventory(ctx: &Ctx, json: bool) -> Result<()> {
-    let roster = accounts::observe(ctx);
+    // Only reads: the list as saved, not brought up to date.
+    let roster = Roster::load(&ctx.paths);
     let held: Inventory = inventory::read(ctx);
     let signed_in = logins::list(ctx).signed_in;
     // In the list's order, then anyone it does not have yet.
@@ -764,11 +765,14 @@ fn show_inventory(ctx: &Ctx, json: bool) -> Result<()> {
             None => println!("   artifacts:   none"),
         }
         for line in missing_lines(&held.missing(a)) {
-            println!("   missing:     {line}");
+            println!("   not seen:    {line}");
+        }
+        if h.unreadable > 0 {
+            println!("   ! {} record(s) or list(s) could not be read, so this may be incomplete", h.unreadable);
         }
     }
     println!();
-    println!("Connectors are the ones seen in each account's sessions. Artifacts belong to the account that published them; share one to edit it from another account.");
+    println!("Connectors are the ones seen in each account's sessions, not a check of what is connected now. Artifacts belong to the account that published them; share one with edit access to update it from another account.");
     Ok(())
 }
 

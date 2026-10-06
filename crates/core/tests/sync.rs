@@ -790,3 +790,57 @@ fn the_inventory_tells_what_stays_with_each_account() {
     e.sync();
     assert_eq!(inventory::read(&e.ctx()), held);
 }
+
+/// The inventory reads records with the scanner's care: never through a symlinked folder, never a
+/// file that is not a session's own; and what it cannot read is counted, not taken for "none".
+#[cfg(unix)]
+#[test]
+fn the_inventory_trusts_only_what_the_scanner_trusts() {
+    use cc_same_core::inventory;
+    let e = Env::new();
+    let slack = json!({"name": "Slack", "url": "https://mcp.slack.com", "uuid": "u2", "tools": []});
+    let (x, y) = (uid(), uid());
+    e.record(A, &x, 100_000, json!({"remoteMcpServersConfig": [slack.clone()]}));
+    // B's folder is a link to A's: A's connectors are not B's.
+    let b = e.user_data.join(Surface::Code.dir_name()).join(B.0);
+    fs::create_dir_all(&b).unwrap();
+    std::os::unix::fs::symlink(e.code(A), b.join(B.1)).unwrap();
+    // A record that names another session, a damaged one, and a FIFO: none of them count, and the
+    // FIFO is never opened.
+    let other = e.record(C, &y, 100_000, json!({"remoteMcpServersConfig": [slack]}));
+    fs::rename(&other, e.code(C).join(format!("local_{}.json", uid()))).unwrap();
+    fs::write(e.code(C).join(format!("local_{}.json", uid())), "{not json").unwrap();
+    let fifo = std::ffi::CString::new(e.code(C).join(format!("local_{}.json", uid())).to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    // A plugin list that cannot be read.
+    let synced = e.root.join("plugins-synced").join(format!("{}_{}", C.1, C.0));
+    fs::create_dir_all(&synced).unwrap();
+    fs::write(synced.join("manifest.json"), "[").unwrap();
+
+    let held = inventory::read(&e.ctx());
+    assert_eq!(held.of(A.0).unwrap().connectors.len(), 1);
+    let b = held.of(B.0).unwrap();
+    assert!(b.connectors.is_empty());
+    assert_eq!(b.unreadable, 1);
+    let c = held.of(C.0).unwrap();
+    assert!(c.connectors.is_empty() && c.plugins.is_empty());
+    assert_eq!(c.unreadable, 4);
+}
+
+/// Plugins of the same name from different marketplaces are different plugins.
+#[test]
+fn plugins_are_told_apart_by_marketplace() {
+    use cc_same_core::inventory;
+    let e = Env::new();
+    for (p, market) in [(A, "company"), (B, "community")] {
+        e.code(p);
+        let synced = e.root.join("plugins-synced").join(format!("{}_{}", p.1, p.0));
+        fs::create_dir_all(&synced).unwrap();
+        let manifest = json!({"plugins": [{"name": "legal", "marketplaceName": market}]});
+        fs::write(synced.join("manifest.json"), manifest.to_string()).unwrap();
+    }
+    let held = inventory::read(&e.ctx());
+    let missing = held.missing(A.0);
+    assert_eq!(missing.plugins.len(), 1);
+    assert_eq!(missing.plugins[0].marketplace.as_deref(), Some("community"));
+}
