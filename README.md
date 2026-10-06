@@ -94,7 +94,18 @@ cc-same switch [<who>] switch Claude to an account, or the next one (--strategy 
 cc-same add            restart Claude signed out, to add an account (the current one is kept)
 cc-same remove <who>   take an account off the list, forgetting the sign-in kept for it
 cc-same alias <who> <name>, disable <who>, enable <who>, move <who> <number>
-cc-same config         --exclude <account-id>, --auto-join off, …
+cc-same config         --exclude <account-id>, --auto-join off, --on-switch <command>, …
+```
+
+**Hooks.** `cc-same config --on-switch '<command>'` runs a command after every account switch, and
+`--on-sync-error '<command>'` when the background sync starts failing (once, not on every pass).
+It runs through the shell with `CC_SAME_EVENT`, `CC_SAME_MESSAGE`, `CC_SAME_FROM`/`CC_SAME_TO`
+(and their `_EMAIL`), or `CC_SAME_ERRORS` in its environment, and is stopped after a minute. The
+background agent runs it with a short `PATH`, so name programs by their full path. For example,
+to post to a chat webhook:
+
+```bash
+cc-same config --on-sync-error '/usr/bin/curl -s -H "Content-Type: application/json" -d "{\"content\": \"$CC_SAME_MESSAGE\"}" https://example.com/webhook'
 ```
 
 ## What stays in sync

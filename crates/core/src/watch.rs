@@ -124,6 +124,7 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
     let mut last_full: Option<Instant> = None;
     let mut last_running: Option<bool> = None;
     let mut passes = 0u64;
+    let mut failing = crate::hooks::Failing::default();
     // The heartbeat has a thread of its own, from the start: a long first sync must not make a
     // working agent look dead to the app.
     let done = AtomicBool::new(false);
@@ -172,6 +173,7 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
                 crate::accounts::observe(ctx);
                 match apply::run_sync(ctx, "watch") {
                     Ok((_, out)) => {
+                        failing.pass(ctx, &out.errors);
                         if out.applied_total() > 0 || !out.errors.is_empty() {
                             let kinds: Vec<String> = out.applied.iter().map(|(k, n)| format!("{k:?} {n}")).collect();
                             ctx.log(format!(
@@ -193,7 +195,10 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
                             }
                         }
                     }
-                    Err(e) => ctx.log(format!("watch: {e:#}")),
+                    Err(e) => {
+                        ctx.log(format!("watch: {e:#}"));
+                        failing.pass(ctx, &[format!("{e:#}")]);
+                    }
                 }
                 // Remember what this pass started from, not what it left: a change made while it
                 // ran must trigger the next pass. Our own writes do too, and that pass finds nothing.

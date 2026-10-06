@@ -154,6 +154,12 @@ enum Cmd {
         /// Desktop notifications from the background agent
         #[arg(long)]
         notify: Option<OnOff>,
+        /// A shell command to run after Claude switches accounts ("" to remove it)
+        #[arg(long, value_name = "COMMAND")]
+        on_switch: Option<String>,
+        /// A shell command to run when the background sync starts failing ("" to remove it)
+        #[arg(long, value_name = "COMMAND")]
+        on_sync_error: Option<String>,
     },
 }
 
@@ -254,7 +260,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Disable { account } => sit_out(&ctx, &account, true),
         Cmd::Enable { account } => sit_out(&ctx, &account, false),
         Cmd::Move { account, number } => move_account(&ctx, &account, number),
-        Cmd::Config { exclude, include, auto_join, notify } => {
+        Cmd::Config { exclude, include, auto_join, notify, on_switch, on_sync_error } => {
             let mut cfg = ctx.config();
             let before = cfg.clone();
             for id in exclude {
@@ -268,6 +274,13 @@ fn run(cli: Cli) -> Result<()> {
             }
             if let Some(v) = notify {
                 cfg.notify = matches!(v, OnOff::On);
+            }
+            let hook = |c: String| Some(c).filter(|c| !c.trim().is_empty());
+            if let Some(c) = on_switch {
+                cfg.on_switch = hook(c);
+            }
+            if let Some(c) = on_sync_error {
+                cfg.on_sync_error = hook(c);
             }
             if cfg != before {
                 cfg.save(&ctx.paths)?;
