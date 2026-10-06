@@ -100,8 +100,8 @@ cc-same config         --exclude <account-id>, --auto-join off, --on-switch <com
 **Hooks.** `cc-same config --on-switch '<command>'` runs a command after every account switch, and
 `--on-sync-error '<command>'` when the background sync starts failing (once, not on every pass).
 It runs through the shell with `CC_SAME_EVENT`, `CC_SAME_MESSAGE`, `CC_SAME_FROM`/`CC_SAME_TO`
-(and their `_EMAIL`), or `CC_SAME_ERRORS` in its environment, and is stopped, with everything it
-started, after a minute. The background agent runs it with a short `PATH`, so name programs by
+(and their `_EMAIL`), or `CC_SAME_ERRORS` in its environment. If it is still running after a
+minute, it is stopped with everything it started. The background agent runs it with a short `PATH`, so name programs by
 their full path. A hook is your own command: CC Same itself stays offline, but a hook can do
 anything you can. For example, to post to a chat webhook (with `jq` to build the JSON):
 

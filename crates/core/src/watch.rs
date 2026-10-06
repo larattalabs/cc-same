@@ -173,7 +173,9 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
                 crate::accounts::observe(ctx);
                 match apply::run_sync(ctx, "watch") {
                     Ok((plan, out)) => {
-                        failing.pass(ctx, &[out.errors.clone(), plan.skipped.clone()].concat());
+                        // Changes left waiting for Claude prove nothing either way.
+                        let settled = out.deferred == 0;
+                        failing.pass(ctx, &[out.errors.clone(), plan.skipped.clone()].concat(), settled);
                         if out.applied_total() > 0 || !out.errors.is_empty() {
                             let kinds: Vec<String> = out.applied.iter().map(|(k, n)| format!("{k:?} {n}")).collect();
                             ctx.log(format!(
@@ -197,7 +199,7 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
                     }
                     Err(e) => {
                         ctx.log(format!("watch: {e:#}"));
-                        failing.pass(ctx, &[format!("{e:#}")]);
+                        failing.pass(ctx, &[format!("{e:#}")], true);
                     }
                 }
                 // Remember what this pass started from, not what it left: a change made while it

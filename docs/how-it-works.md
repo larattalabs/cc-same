@@ -163,7 +163,8 @@ Its preferences live next to the sync settings in `<state>/config.json`: `appear
 
 ### Updates
 
-The app is the only part that goes online, and only for this. A few seconds after it starts and
+The app is the only part that goes online, and only for this (hooks you set are your own
+commands, and do what they do). A few seconds after it starts and
 then once a day it asks GitHub's API for the latest release. When there is a newer one:
 
 1. It downloads the archive for this system (`CC-Same-<version>-<platform>`) into
