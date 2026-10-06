@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use cc_same_core::accounts::{self, NotFound, Roster, Slot, Strategy};
+use cc_same_core::cli_login::Followed;
 use cc_same_core::desktop::{self, Quitting};
 use cc_same_core::logins;
 use cc_same_core::report::{self, Overview, Warning};
@@ -154,6 +155,9 @@ enum Cmd {
         /// Desktop notifications from the background agent
         #[arg(long)]
         notify: Option<OnOff>,
+        /// Switch Claude Code in the terminal along with Claude (macOS)
+        #[arg(long)]
+        switch_cli: Option<OnOff>,
     },
 }
 
@@ -254,7 +258,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Disable { account } => sit_out(&ctx, &account, true),
         Cmd::Enable { account } => sit_out(&ctx, &account, false),
         Cmd::Move { account, number } => move_account(&ctx, &account, number),
-        Cmd::Config { exclude, include, auto_join, notify } => {
+        Cmd::Config { exclude, include, auto_join, notify, switch_cli } => {
             let mut cfg = ctx.config();
             let before = cfg.clone();
             for id in exclude {
@@ -268,6 +272,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             if let Some(v) = notify {
                 cfg.notify = matches!(v, OnOff::On);
+            }
+            if let Some(v) = switch_cli {
+                cfg.switch_cli = matches!(v, OnOff::On);
             }
             if cfg != before {
                 cfg.save(&ctx.paths)?;
@@ -664,14 +671,31 @@ fn switch(ctx: &Ctx, account: Option<&str>, strategy: Option<Strategy>, json: bo
     }
     let done = accounts::switch(ctx, &target, &quit_watch())?;
     if json {
+        let cli = match &done.cli {
+            Some(Ok(followed)) => serde_json::to_value(followed)?,
+            Some(Err(e)) => serde_json::json!({ "outcome": "failed", "error": e }),
+            None => serde_json::Value::Null,
+        };
         let out = serde_json::json!({
             "schemaVersion": 1, "switched": true, "from": done.from, "to": done.to, "launched": done.launched,
+            "cli": cli,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
     let restarted = if done.launched { " (restarted)" } else { "" };
     println!("Claude is signed in to {name}{restarted}.");
+    match &done.cli {
+        Some(Ok(Followed::Switched { .. } | Followed::AlreadyThere)) => {
+            println!("So is Claude Code in the terminal.");
+        }
+        Some(Ok(Followed::SignedOut { from })) => println!(
+            "Claude Code in the terminal is signed out, with {}'s sign-in kept: run /login in claude once to sign it in to {name}. From then on it switches along.",
+            name_in(&roster, from)
+        ),
+        Some(Ok(Followed::Stayed { .. } | Followed::NotSignedIn)) | None => {}
+        Some(Err(e)) => println!("Claude Code in the terminal was not switched: {e}"),
+    }
     Ok(())
 }
 

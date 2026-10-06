@@ -94,8 +94,15 @@ cc-same switch [<who>] switch Claude to an account, or the next one (--strategy 
 cc-same add            restart Claude signed out, to add an account (the current one is kept)
 cc-same remove <who>   take an account off the list, forgetting the sign-in kept for it
 cc-same alias <who> <name>, disable <who>, enable <who>, move <who> <number>
-cc-same config         --exclude <account-id>, --auto-join off, …
+cc-same config         --exclude <account-id>, --auto-join off, --switch-cli on, …
 ```
+
+**The terminal too** (macOS). Claude Code in the terminal keeps a sign-in of its own. With
+`cc-same config --switch-cli on`, `switch` takes it along: its sign-in is set aside in your login
+keychain and the one kept for the other account is put back. The first time you switch to an
+account, the terminal is signed out instead: run `/login` in `claude` once, to that account, and
+from then on it switches back and forth with Claude. Only the default `~/.claude` is switched
+(not a `CLAUDE_CONFIG_DIR`).
 
 ## What stays in sync
 

@@ -3,6 +3,17 @@
 What changed in each version of CC Same. The app shows these notes after it updates, and under
 Settings › Updates.
 
+## Unreleased
+
+### Added
+
+- **Switch the terminal too** (macOS). Claude Code in the terminal keeps a sign-in of its own, so
+  after a switch it stayed on the old account. With `cc-same config --switch-cli on`, it switches
+  along: its sign-in is set aside in your login keychain, and the one kept for the other account
+  is put back. The first time you switch to an account, the terminal is signed out instead, with
+  its sign-in kept: run `/login` in `claude` once, and from then on it switches with Claude. Off
+  unless you turn it on.
+
 ## 0.1.10 - 2026-10-05
 
 ### Added

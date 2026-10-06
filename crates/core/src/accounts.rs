@@ -346,6 +346,9 @@ pub fn remove(ctx: &Ctx, account: &str) -> Result<()> {
         return Err(Refused::SignedIn.into());
     }
     logins::forget(ctx, account)?;
+    if ctx.config().switch_cli {
+        crate::cli_login::forget(ctx, account)?;
+    }
     edit(&ctx.paths, |roster| {
         roster.slots.retain(|s| s.account != account);
         Ok(())

@@ -183,6 +183,32 @@ itself. The background agent keeps running the version it started with, so after
 app sets it up again the next time it starts. *What's new* shows the
 release notes, from [CHANGELOG.md](../CHANGELOG.md).
 
+## The terminal's sign-in
+
+Claude Code in the terminal does not use Claude Desktop's sign-in: it keeps its tokens in the
+login keychain (`Claude Code-credentials`, under your user name) and who they belong to in
+`oauthAccount` of `~/.claude.json`. With `switchCli` on, a switch takes it along once Desktop's
+sign-in has moved:
+
+1. It takes the locks Claude Code takes, as folders: `~/.claude/.oauth_refresh.lock` and
+   `~/.claude.lock`, which Claude Code holds while it refreshes its tokens, and
+   `~/.claude.json.lock`, which it holds while it writes its config. A `claude` running meanwhile
+   finishes a refresh first, or finds the new account's tokens after it. A lock older than Claude
+   Code's own staleness limit (60 and 10 seconds) was left behind and is taken over.
+2. The sign-in in use, whoever it belongs to, is set aside in the keychain under
+   `cc-same CLI sign-in` and the account's ID, with its `oauthAccount`.
+3. The one kept for the account Claude switched to goes into `Claude Code-credentials`, and its
+   `oauthAccount` into `~/.claude.json`; nothing else in that file changes. If nothing is kept
+   for it yet, both are removed instead, and `claude` asks you to sign in. Signing in over the old
+   sign-in instead would have ended it with nothing kept.
+4. A copy put back is forgotten: tokens rotate as they are used, so it is set aside afresh when
+   it is left. If any step fails, the sign-in in use goes back where it was.
+
+Secrets go through `/usr/bin/security`, as hex on its standard input, never on a command line,
+and are read back after writing. They never leave the keychain for a file. A failure here leaves
+Desktop's switch standing and is reported with it. With `CLAUDE_CONFIG_DIR` set, Claude Code names
+its keychain item after that folder, and the terminal is left alone.
+
 ## Transcripts
 
 CC Same copies session records, not transcripts: every account already reads the same

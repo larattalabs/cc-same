@@ -40,6 +40,8 @@ pub struct Config {
     /// Desktop app: download new versions in the background and install them while the window
     /// is closed.
     pub auto_update: bool,
+    /// Switch Claude Code's command line along with Claude Desktop ([`crate::cli_login`]).
+    pub switch_cli: bool,
 }
 
 impl Default for Config {
@@ -57,6 +59,7 @@ impl Default for Config {
             tray: true,
             check_updates: true,
             auto_update: true,
+            switch_cli: false,
         }
     }
 }

@@ -32,6 +32,8 @@ pub struct Paths {
     pub managed_settings: PathBuf,
     /// Claude Code CLI state (its `oauthAccount` labels an account with an email).
     pub claude_json: PathBuf,
+    /// A folder standing in for the login keychain, for tests and scripts (`CC_SAME_KEYCHAIN_DIR`).
+    pub keychain_dir: Option<PathBuf>,
 }
 
 impl Paths {
@@ -69,6 +71,7 @@ impl Paths {
             claude_settings: claude_home.join("settings.json"),
             managed_settings: default_managed_settings(),
             claude_json: home().join(".claude.json"),
+            keychain_dir: env_path("CC_SAME_KEYCHAIN_DIR"),
         }
     }
 

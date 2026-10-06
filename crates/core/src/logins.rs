@@ -135,6 +135,9 @@ pub struct Switched {
     pub to: Option<String>,
     /// Claude was started again: it was running, or it is needed to sign in.
     pub launched: bool,
+    /// What became of Claude Code's command line, when it switches too (`switchCli`). A failure
+    /// there leaves Claude Desktop's switch standing.
+    pub cli: Option<Result<crate::cli_login::Followed, String>>,
 }
 
 /// Quit Claude, set its sign-in aside, put `target`'s back, and start Claude again if it was
@@ -166,6 +169,7 @@ pub fn switch(ctx: &Ctx, target: Target, watch: &desktop::Watch) -> Result<Switc
     }
     recover(&ctx.paths)?;
     let from = desktop::last_known_account(ctx);
+    let mut cli = None;
     if from.is_some() && from == to {
         // Already signed in to it; a copy set aside earlier is out of date.
         if let Some(account) = &to {
@@ -174,12 +178,19 @@ pub fn switch(ctx: &Ctx, target: Target, watch: &desktop::Watch) -> Result<Switc
     } else {
         let email = from.as_ref().and_then(|a| crate::scan::account_labels(ctx).remove(a));
         swap(&ctx.paths, from.as_deref(), to.as_deref(), email)?;
+        if ctx.config().switch_cli {
+            let followed = crate::cli_login::follow(ctx, to.as_deref());
+            if let Err(e) = &followed {
+                ctx.log(format!("switching the command line: {e:#}"));
+            }
+            cli = Some(followed.map_err(|e| format!("{e:#}")));
+        }
     }
     let launched = was_running || to.is_none();
     if launched {
         desktop::launch(ctx)?;
     }
-    Ok(Switched { from, to, launched })
+    Ok(Switched { from, to, launched, cli })
 }
 
 /// Delete the sign-in saved for `account`.
@@ -516,7 +527,7 @@ mod tests {
     fn signing_in_to_another_account_sets_the_first_aside() {
         let mac = Mac::new(ADA);
         let switched = switch(&mac.ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
-        assert_eq!(switched, Switched { from: Some(ADA.into()), to: None, launched: true });
+        assert_eq!(switched, Switched { from: Some(ADA.into()), to: None, launched: true, cli: None });
         // Claude has nobody's sign-in, and keeps every other setting.
         assert!(!mac.data().join("Cookies").exists() && !mac.data().join("Local Storage").exists());
         let config = mac.config();
@@ -542,7 +553,7 @@ mod tests {
         assert_eq!(list(&mac.ctx).signed_in.as_deref(), Some(GRACE));
 
         let switched = switch(&mac.ctx, Target::Account(ADA), &desktop::Watch::default()).unwrap();
-        assert_eq!(switched, Switched { from: Some(GRACE.into()), to: Some(ADA.into()), launched: false });
+        assert_eq!(switched, Switched { from: Some(GRACE.into()), to: Some(ADA.into()), launched: false, cli: None });
         assert_eq!(mac.owner(), format!("cookies of {ADA}"));
         assert_eq!(mac.config()["oauth:tokenCacheV2"], format!("tokens of {ADA}"));
         assert_eq!(mac.config()["lastKnownAccountUuid"], ADA);
@@ -656,6 +667,45 @@ mod tests {
         let keys = fsx::read_json(&ada.join(KEYS_FILE), 1 << 20).unwrap();
         assert_eq!(keys["oauth:tokenCacheV2"], format!("tokens of {ADA}"));
         assert!(!root.join(JOURNAL).exists());
+    }
+
+    /// With `switchCli`, Claude Code in the terminal switches along: signed out (its sign-in
+    /// kept) the first time, then back and forth with Claude.
+    #[test]
+    fn the_command_line_switches_along_when_asked() {
+        use crate::cli_login::Followed;
+        use crate::secrets::{Folder, Secrets as _};
+        let mac = Mac::new(ADA);
+        let mut paths = mac.ctx.paths.clone();
+        let keychain = paths.state_dir.with_file_name("keychain");
+        paths.keychain_dir = Some(keychain.clone());
+        let config = Config { switch_cli: true, ..Config::default() };
+        let fake = FakeDesktop { running: Some(false), active: None };
+        let ctx = Ctx::new(paths, config, fake, LogSink::Silent);
+        let keychain = Folder(keychain);
+        let user = std::env::var("USER").unwrap_or_default();
+        let cli_login = |account: &str| {
+            keychain.set("Claude Code-credentials", &user, &format!("cli tokens of {account}")).unwrap();
+            let oa = serde_json::json!({ "oauthAccount": { "accountUuid": account } });
+            fs::write(&ctx.paths.claude_json, oa.to_string()).unwrap();
+        };
+        let cli_on = || keychain.get("Claude Code-credentials", &user).unwrap();
+
+        cli_login(ADA);
+        let done = switch(&ctx, Target::SignedOut, &desktop::Watch::default()).unwrap();
+        assert_eq!(done.cli, Some(Ok(Followed::Stayed { on: ADA.into() })));
+        mac.sign_in(GRACE);
+        let done = switch(&ctx, Target::Account(ADA), &desktop::Watch::default()).unwrap();
+        // The terminal was on Ada all along.
+        assert_eq!(done.cli, Some(Ok(Followed::AlreadyThere)));
+        let done = switch(&ctx, Target::Account(GRACE), &desktop::Watch::default()).unwrap();
+        assert_eq!(done.cli, Some(Ok(Followed::SignedOut { from: ADA.into() })));
+        assert_eq!(cli_on(), None);
+        cli_login(GRACE);
+        let done = switch(&ctx, Target::Account(ADA), &desktop::Watch::default()).unwrap();
+        assert_eq!(done.cli, Some(Ok(Followed::Switched { from: GRACE.into() })));
+        assert_eq!(cli_on().as_deref(), Some(format!("cli tokens of {ADA}").as_str()));
+        assert_eq!(mac.owner(), format!("cookies of {ADA}"));
     }
 
     #[test]
