@@ -703,22 +703,36 @@ fn missing_lines(missing: &inventory::Missing) -> Vec<String> {
         lines.push(format!("connectors {} (seen in other accounts' sessions)", names.join(", ")));
     }
     if !missing.plugins.is_empty() {
-        let names: Vec<&str> = missing.plugins.iter().map(|p| p.name.as_str()).collect();
+        let names: Vec<String> = missing.plugins.iter().map(plugin_name).collect();
         lines.push(format!("org plugins {}", names.join(", ")));
     }
     lines
+}
+
+/// "legal (knowledge-work-plugins)": the same name from two marketplaces is two plugins.
+fn plugin_name(p: &inventory::Plugin) -> String {
+    match &p.marketplace {
+        Some(m) => format!("{} ({m})", p.name),
+        None => p.name.clone(),
+    }
 }
 
 fn show_inventory(ctx: &Ctx, json: bool) -> Result<()> {
     // Only reads: the list as saved, not brought up to date.
     let roster = Roster::load(&ctx.paths);
     let held: Inventory = inventory::read(ctx);
-    let signed_in = logins::list(ctx).signed_in;
-    // In the list's order, then anyone it does not have yet.
+    // In the list's order, then anyone it does not have yet: signed in, kept, or seen on disk.
+    let found = logins::list(ctx);
+    let signed_in = found.signed_in.clone();
     let mut order: Vec<&str> = roster.slots.iter().map(|s| s.account.as_str()).collect();
-    for h in &held.accounts {
-        if !order.contains(&h.account.as_str()) {
-            order.push(&h.account);
+    let others = found
+        .signed_in
+        .iter()
+        .chain(found.saved.iter().map(|s| &s.account))
+        .chain(held.accounts.iter().map(|h| &h.account));
+    for account in others {
+        if !order.contains(&account.as_str()) {
+            order.push(account);
         }
     }
     if json {
@@ -735,7 +749,8 @@ fn show_inventory(ctx: &Ctx, json: bool) -> Result<()> {
                 })
             })
             .collect();
-        let out = serde_json::json!({ "schemaVersion": 1, "accounts": rows });
+        let out =
+            serde_json::json!({ "schemaVersion": 1, "accounts": rows, "pluginsUnreadable": held.plugins_unreadable });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -754,7 +769,8 @@ fn show_inventory(ctx: &Ctx, json: bool) -> Result<()> {
         let h = held.of(a).cloned().unwrap_or_default();
         let list = |names: Vec<&str>| if names.is_empty() { "none".to_string() } else { names.join(", ") };
         println!("   connectors:  {}", list(h.connectors.iter().map(|c| c.name.as_str()).collect()));
-        println!("   org plugins: {}", list(h.plugins.iter().map(|p| p.name.as_str()).collect()));
+        let plugins: Vec<String> = h.plugins.iter().map(plugin_name).collect();
+        println!("   org plugins: {}", list(plugins.iter().map(String::as_str).collect()));
         match h.artifacts.first() {
             Some(newest) => println!(
                 "   artifacts:   {} published, newest {}{}",
@@ -772,6 +788,9 @@ fn show_inventory(ctx: &Ctx, json: bool) -> Result<()> {
         }
     }
     println!();
+    if held.plugins_unreadable {
+        println!("! Claude Code's synced plugins could not be read, so no account's org plugins are listed.");
+    }
     println!("Connectors are the ones seen in each account's sessions, not a check of what is connected now. Artifacts belong to the account that published them; share one with edit access to update it from another account.");
     Ok(())
 }

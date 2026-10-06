@@ -86,8 +86,11 @@ impl Missing {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Inventory {
     pub accounts: Vec<Holdings>,
+    /// The synced plugins' folder exists but could not be listed: no account's plugins are known.
+    pub plugins_unreadable: bool,
 }
 
 impl Inventory {
@@ -182,7 +185,7 @@ pub fn read(ctx: &Ctx) -> Inventory {
             }
         }
     }
-    let plugins = synced_plugins(ctx, &mut unreadable);
+    let (plugins, plugins_unreadable) = synced_plugins(ctx, &mut unreadable);
     let accounts: BTreeSet<&String> = connectors.keys().chain(plugins.keys()).collect();
     let accounts = accounts
         .into_iter()
@@ -202,13 +205,18 @@ pub fn read(ctx: &Ctx) -> Inventory {
             }
         })
         .collect();
-    Inventory { accounts }
+    Inventory { accounts, plugins_unreadable }
 }
 
 /// Plugins per account, from every `<org>_<account>` folder of Claude Code's synced plugins.
-fn synced_plugins(ctx: &Ctx, unreadable: &mut BTreeMap<String, usize>) -> BTreeMap<String, BTreeSet<Plugin>> {
+fn synced_plugins(ctx: &Ctx, unreadable: &mut BTreeMap<String, usize>) -> (BTreeMap<String, BTreeSet<Plugin>>, bool) {
     let mut out: BTreeMap<String, BTreeSet<Plugin>> = BTreeMap::new();
-    let Ok(dirs) = fs::read_dir(&ctx.paths.synced_plugins) else { return out };
+    let dirs = match fs::read_dir(&ctx.paths.synced_plugins) {
+        Ok(dirs) => dirs,
+        // No synced plugins at all: none to know of.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (out, false),
+        Err(_) => return (out, true),
+    };
     for dir in dirs.flatten() {
         let name = dir.file_name().to_string_lossy().into_owned();
         let Some((org, account)) = name.split_once('_') else { continue };
@@ -233,5 +241,5 @@ fn synced_plugins(ctx: &Ctx, unreadable: &mut BTreeMap<String, usize>) -> BTreeM
             }
         }
     }
-    out
+    (out, false)
 }
