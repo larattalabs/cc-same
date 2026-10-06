@@ -172,8 +172,8 @@ pub fn run(ctx: &Ctx, opts: &WatchOptions, stop: &AtomicBool) {
                 // An account Claude signs in to joins the list even with no window open.
                 crate::accounts::observe(ctx);
                 match apply::run_sync(ctx, "watch") {
-                    Ok((_, out)) => {
-                        failing.pass(ctx, &out.errors);
+                    Ok((plan, out)) => {
+                        failing.pass(ctx, &[out.errors.clone(), plan.skipped.clone()].concat());
                         if out.applied_total() > 0 || !out.errors.is_empty() {
                             let kinds: Vec<String> = out.applied.iter().map(|(k, n)| format!("{k:?} {n}")).collect();
                             ctx.log(format!(

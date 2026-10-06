@@ -100,12 +100,13 @@ cc-same config         --exclude <account-id>, --auto-join off, --on-switch <com
 **Hooks.** `cc-same config --on-switch '<command>'` runs a command after every account switch, and
 `--on-sync-error '<command>'` when the background sync starts failing (once, not on every pass).
 It runs through the shell with `CC_SAME_EVENT`, `CC_SAME_MESSAGE`, `CC_SAME_FROM`/`CC_SAME_TO`
-(and their `_EMAIL`), or `CC_SAME_ERRORS` in its environment, and is stopped after a minute. The
-background agent runs it with a short `PATH`, so name programs by their full path. For example,
-to post to a chat webhook:
+(and their `_EMAIL`), or `CC_SAME_ERRORS` in its environment, and is stopped, with everything it
+started, after a minute. The background agent runs it with a short `PATH`, so name programs by
+their full path. A hook is your own command: CC Same itself stays offline, but a hook can do
+anything you can. For example, to post to a chat webhook (with `jq` to build the JSON):
 
 ```bash
-cc-same config --on-sync-error '/usr/bin/curl -s -H "Content-Type: application/json" -d "{\"content\": \"$CC_SAME_MESSAGE\"}" https://example.com/webhook'
+cc-same config --on-sync-error '/opt/homebrew/bin/jq -n --arg c "$CC_SAME_MESSAGE" "{content: \$c}" | /usr/bin/curl -s -H "Content-Type: application/json" -d @- https://example.com/webhook'
 ```
 
 ## What stays in sync
@@ -145,6 +146,7 @@ folder. CC Same can undo that setup for you (`cc-same fix-symlinks`).
   artifacts, pins) never travel to another.
 - Syncing needs no network access: everything happens on your machine. The app only goes online
   to ask GitHub for a new version once a day and to download it; Settings › Updates turns that off.
+- Hooks (above) are commands of your own: they do whatever they do, network included.
 
 ## Building from source
 

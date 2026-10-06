@@ -182,7 +182,10 @@ impl From<StrategyArg> for Strategy {
 
 fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run(cli) {
+    let result = run(cli);
+    // A hook started here (`switch`, `add`) is stopped if it hangs, which needs us still running.
+    cc_same_core::hooks::wait();
+    if let Err(e) = result {
         eprintln!("cc-same: {e:#}");
         std::process::exit(2);
     }

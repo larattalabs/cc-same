@@ -12,7 +12,10 @@ Settings › Updates.
   runs one when the background sync starts failing: to post to a chat, say, or to set something
   up for the account you switched to. What happened is in the command's environment
   (`CC_SAME_EVENT`, `CC_SAME_MESSAGE`, `CC_SAME_FROM`, `CC_SAME_TO`, …). A hook never holds
-  anything up, and a sync error runs its hook once, not on every pass while it keeps failing.
+  a switch or a sync up, is stopped with everything it started if it runs past a minute, and a
+  sync error (a failed change or a folder that can't be read) runs its hook once, not on every
+  pass while it keeps failing. CC Same itself stays offline; a hook is your command and can do
+  whatever you can.
 
 ## 0.1.10 - 2026-10-05
 
