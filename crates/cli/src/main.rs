@@ -431,7 +431,7 @@ fn warning_text(w: &Warning, labels: &BTreeMap<String, String>) -> String {
         }
         Warning::DesktopDataMissing { path } => format!("Claude Desktop's data folder was not found at {}", path.display()),
         Warning::CliOnOtherAccount { cli, desktop } => format!(
-            "Claude Code in the terminal is signed in to {}, Claude Desktop to {}: unless the terminal uses an API key, what you run there counts against {}'s plan. To change it, run /login in claude",
+            "Claude Code in the terminal has a claude.ai login for {}, Claude Desktop is signed in to {}: when the terminal uses that login (not an API key or a cloud provider), what you run there counts against {}'s plan. To change it, run /login in claude",
             label(cli),
             label(desktop),
             label(cli),

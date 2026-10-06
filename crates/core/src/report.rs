@@ -54,7 +54,8 @@ pub enum Warning {
     /// Claude Desktop's data folder was not found.
     DesktopDataMissing { path: PathBuf },
     /// Claude Code in the terminal is signed in to another account than Claude Desktop, so what
-    /// runs there counts against that account's plan (unless it uses an API key instead).
+    /// runs there counts against that account's plan when it uses that login (not an API key or a
+    /// cloud provider).
     CliOnOtherAccount { cli: String, desktop: String },
 }
 
