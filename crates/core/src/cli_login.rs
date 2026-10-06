@@ -259,7 +259,8 @@ fn undo(live: &Live, journal: &Journal) -> Result<()> {
     // Someone signed in since (with /login): that sign-in stays, and what was set aside stays kept.
     let ours = on.is_none() || on == journal.from || on == journal.to;
     if ours {
-        let shared = live.credentials().ok().flatten().unwrap_or_default();
+        // A keychain that cannot be read stops the undo: its shared fields must not be lost.
+        let shared = live.credentials()?.unwrap_or_default();
         match &journal.from {
             Some(from) => {
                 let kept = live.kept(from)?.ok_or_else(|| anyhow!("the sign-in set aside for {from} is gone"))?;
@@ -469,6 +470,7 @@ mod tests {
     const GRACE: &str = "9e31ea7e-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
 
     struct Mac {
+        #[cfg_attr(not(unix), allow(dead_code))]
         tmp: tempfile::TempDir,
         ctx: Ctx,
         stores: Stores,
@@ -723,6 +725,7 @@ mod tests {
         assert!(mac.kept(GRACE).is_none() && mac.journal().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_codes_locks_are_waited_for_kept_fresh_and_given_back() {
         let mac = Mac::new();

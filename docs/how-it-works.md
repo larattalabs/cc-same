@@ -211,8 +211,9 @@ sign-ins of MCP servers and plugins (`mcpOAuth`, `mcpOAuthClientConfig`, `mcpXaa
    is removed instead and the shared fields stay: `claude` asks you to sign in. Signing in over
    the old sign-in instead would have ended it with nothing kept. Switching back signs it in again.
 5. The copy put back is forgotten before the switch counts as done: tokens rotate as they are
-   used, so it is set aside afresh when it is left, and never put back twice. If any step
-   fails, the sign-in in use goes back where it was, now or at the next switch.
+   used, so it is set aside afresh when it is left. If a step before that fails, the sign-in in
+   use goes back where it was, now or at the next switch; if forgetting the copy fails, the next
+   switch forgets it first.
 
 Secrets go through `/usr/bin/security`, as hex on its standard input, never on a command line,
 and are read back after writing. Kept copies are JSON with everything beyond ASCII escaped, since
