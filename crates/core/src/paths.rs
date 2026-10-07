@@ -34,6 +34,8 @@ pub struct Paths {
     pub claude_json: PathBuf,
     /// Claude Code's copies of each organization's plugins, one `<org>_<account>` folder each.
     pub synced_plugins: PathBuf,
+    /// A folder standing in for the login keychain, for tests and scripts (`CC_SAME_KEYCHAIN_DIR`).
+    pub keychain_dir: Option<PathBuf>,
 }
 
 impl Paths {
@@ -75,6 +77,7 @@ impl Paths {
                 .map(|dir| dir.join(".claude.json"))
                 .unwrap_or_else(|| home().join(".claude.json")),
             synced_plugins: claude_home.join("plugins").join("synced"),
+            keychain_dir: env_path("CC_SAME_KEYCHAIN_DIR"),
         }
     }
 

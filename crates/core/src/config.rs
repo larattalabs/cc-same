@@ -44,6 +44,8 @@ pub struct Config {
     pub on_switch: Option<String>,
     /// A shell command to run when the background sync starts failing ([`crate::hooks`]).
     pub on_sync_error: Option<String>,
+    /// Switch Claude Code's command line along with Claude Desktop ([`crate::cli_login`]).
+    pub switch_cli: bool,
 }
 
 impl Default for Config {
@@ -63,6 +65,7 @@ impl Default for Config {
             auto_update: true,
             on_switch: None,
             on_sync_error: None,
+            switch_cli: false,
         }
     }
 }

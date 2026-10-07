@@ -20,11 +20,12 @@
 
 pub mod accounts;
 pub mod apply;
+pub mod cli_login;
 pub mod config;
 pub mod desktop;
 pub mod fsx;
-pub mod inventory;
 pub mod hooks;
+pub mod inventory;
 pub mod logins;
 pub mod merge;
 pub mod model;
@@ -34,6 +35,7 @@ pub mod plan;
 pub mod report;
 pub mod retention;
 pub mod scan;
+pub mod secrets;
 pub mod service;
 pub mod snapshot;
 pub mod usage;

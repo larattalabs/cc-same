@@ -346,6 +346,8 @@ pub fn remove(ctx: &Ctx, account: &str) -> Result<()> {
         return Err(Refused::SignedIn.into());
     }
     logins::forget(ctx, account)?;
+    // Whether or not the command line switches now: it may have, before.
+    crate::cli_login::forget(ctx, account)?;
     edit(&ctx.paths, |roster| {
         roster.slots.retain(|s| s.account != account);
         Ok(())

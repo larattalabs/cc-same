@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use cc_same_core::accounts::{self, NotFound, Roster, Slot, Strategy};
+use cc_same_core::cli_login::Followed;
 use cc_same_core::desktop::{self, Quitting};
 use cc_same_core::inventory::{self, Inventory};
 use cc_same_core::logins;
@@ -166,6 +167,9 @@ enum Cmd {
         /// A shell command to run when the background sync starts failing ("" to remove it)
         #[arg(long, value_name = "COMMAND")]
         on_sync_error: Option<String>,
+        /// Switch Claude Code in the terminal along with Claude (macOS)
+        #[arg(long)]
+        switch_cli: Option<OnOff>,
     },
 }
 
@@ -270,7 +274,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Disable { account } => sit_out(&ctx, &account, true),
         Cmd::Enable { account } => sit_out(&ctx, &account, false),
         Cmd::Move { account, number } => move_account(&ctx, &account, number),
-        Cmd::Config { exclude, include, auto_join, notify, on_switch, on_sync_error } => {
+        Cmd::Config { exclude, include, auto_join, notify, on_switch, on_sync_error, switch_cli } => {
             let mut cfg = ctx.config();
             let before = cfg.clone();
             for id in exclude {
@@ -291,6 +295,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             if let Some(c) = on_sync_error {
                 cfg.on_sync_error = hook(c);
+            }
+            if let Some(v) = switch_cli {
+                cfg.switch_cli = matches!(v, OnOff::On);
             }
             if cfg != before {
                 cfg.save(&ctx.paths)?;
@@ -684,11 +691,17 @@ fn switch(ctx: &Ctx, account: Option<&str>, strategy: Option<Strategy>, json: bo
     };
     let name = name_in(&roster, &target);
     if found.signed_in.as_deref() == Some(target.as_str()) {
+        // Desktop is there; the command line may not be, after an earlier switch that left it.
+        let cli = logins::follow_cli(ctx, Some(&target));
         if json {
-            let out = serde_json::json!({ "schemaVersion": 1, "switched": false, "to": target, "reason": "already-signed-in" });
+            let out = serde_json::json!({
+                "schemaVersion": 1, "switched": false, "to": target, "reason": "already-signed-in",
+                "cli": cli_json(&cli)?,
+            });
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
             println!("Claude is already signed in to {name}.");
+            print_cli(&roster, &name, &cli);
         }
         return Ok(());
     }
@@ -700,6 +713,7 @@ fn switch(ctx: &Ctx, account: Option<&str>, strategy: Option<Strategy>, json: bo
         let out = serde_json::json!({
             "schemaVersion": 1, "switched": true, "from": done.from, "to": done.to, "launched": done.launched,
             "missing": missing, "artifactsLeftBehind": left_behind,
+            "cli": cli_json(&done.cli)?,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -715,6 +729,7 @@ fn switch(ctx: &Ctx, account: Option<&str>, strategy: Option<Strategy>, json: bo
     for line in missing_lines(&missing) {
         println!("Not seen on {name} yet: {line}");
     }
+    print_cli(&roster, &name, &done.cli);
     Ok(())
 }
 
@@ -816,6 +831,30 @@ fn show_inventory(ctx: &Ctx, json: bool) -> Result<()> {
     }
     println!("Connectors are the ones seen in each account's sessions, not a check of what is connected now. Artifacts belong to the account that published them; share one with edit access to update it from another account.");
     Ok(())
+}
+
+type CliOutcome = Option<Result<Followed, String>>;
+
+fn cli_json(cli: &CliOutcome) -> Result<serde_json::Value> {
+    Ok(match cli {
+        Some(Ok(followed)) => serde_json::to_value(followed)?,
+        Some(Err(e)) => serde_json::json!({ "outcome": "failed", "error": e }),
+        None => serde_json::Value::Null,
+    })
+}
+
+fn print_cli(roster: &Roster, name: &str, cli: &CliOutcome) {
+    match cli {
+        Some(Ok(Followed::Switched { .. } | Followed::AlreadyThere)) => {
+            println!("So is Claude Code in the terminal.");
+        }
+        Some(Ok(Followed::SignedOut { from })) => println!(
+            "Claude Code in the terminal is signed out, with {}'s sign-in kept: run /login in claude once to sign it in to {name}. From then on it switches along.",
+            name_in(roster, from)
+        ),
+        Some(Ok(Followed::Stayed { .. } | Followed::NotSignedIn)) | None => {}
+        Some(Err(e)) => println!("Claude Code in the terminal was not switched: {e}"),
+    }
 }
 
 /// Claude asks before it quits when it has work in progress: say so, and what Ctrl-C does then.

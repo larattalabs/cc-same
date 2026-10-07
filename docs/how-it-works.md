@@ -186,6 +186,50 @@ itself. The background agent keeps running the version it started with, so after
 app sets it up again the next time it starts. *What's new* shows the
 release notes, from [CHANGELOG.md](../CHANGELOG.md).
 
+## The terminal's sign-in
+
+Claude Code in the terminal does not use Claude Desktop's sign-in. It keeps a JSON object in the
+keychain (`Claude Code-credentials`, under your user name) and who it belongs to in `oauthAccount`
+of `~/.claude.json`. Most of that object is the account's: `claudeAiOauth`, the login itself, and
+anything not known to be shared. A few fields are the machine's, shared by every account: the
+sign-ins of MCP servers and plugins (`mcpOAuth`, `mcpOAuthClientConfig`, `mcpXaaIdp`,
+`mcpXaaIdpConfig`, `pluginSecrets`). With `switchCli` on, a switch takes the account's part along:
+
+1. It takes the locks Claude Code takes, as folders: `~/.claude/.oauth_refresh.lock` and
+   `~/.claude.lock`, which Claude Code holds while it refreshes its tokens, and
+   `~/.claude.json.lock`, which it holds while it writes its config. Their times are refreshed
+   every 2 seconds while held, as Claude Code's lock library does. A `claude` running meanwhile
+   finishes a refresh first, or finds the new account's tokens after it. A lock not refreshed for
+   longer than Claude Code's own limit (60 and 10 seconds) was left behind and is taken over.
+2. A journal in `<state>/cli-switch.json` is written before each step that changes something.
+   It names who from and who to, how far the switch got, and a fingerprint (SHA-256) of the
+   login each side had; never a secret. A switch that was interrupted is settled before anything
+   else is done, and only by what the fingerprints prove. When the login in use is exactly the
+   one from before, or exactly the one being put in place, the switch is undone or finished.
+   When it is neither (a `/login` since, or tokens refreshed), the login in use stays as it is,
+   and every copy that switch touched is forgotten, since it may be out of date. At worst an
+   account then needs `/login` once more; an out-of-date login is never put back.
+3. The account's part of the sign-in in use, whoever it belongs to, is set aside in the login
+   keychain under `cc-same CLI sign-in` and the account's ID, with its `oauthAccount`.
+4. The part kept for the account Claude switched to goes back into `Claude Code-credentials`,
+   next to the machine's shared fields as they are now (one gone stays gone), and its
+   `oauthAccount` into `~/.claude.json`. Nothing else in that file changes in content (it is
+   written again with two-space indents). If nothing is kept for that account yet, the login
+   is removed instead and the shared fields stay: `claude` asks you to sign in. Signing in over
+   the old sign-in instead would have ended it with nothing kept. Switching back signs it in again.
+5. The copy put back is forgotten before the switch counts as done: tokens rotate as they are
+   used, so it is set aside afresh when it is left: the account signed in never has a copy kept
+   as well. If a step fails, the switch is settled as above, now or at the next switch. Before
+   every change the locks are checked to still be its own; one taken over stops the switch.
+
+Secrets go through `/usr/bin/security`, as hex on its standard input, never on a command line,
+and are read back after writing. Kept copies are JSON with everything beyond ASCII escaped, since
+`security` prints anything else as hex; that hex is read back as the value. They never leave the
+keychain for a file, and an error about one never quotes it. A failure here leaves Desktop's
+switch standing and is reported with it; `cc-same switch` to the account Claude is already
+signed in to tries the terminal again. With `CLAUDE_CONFIG_DIR` set, Claude Code names its
+keychain item after that folder, and the terminal is left alone.
+
 ## Transcripts
 
 CC Same copies session records, not transcripts: every account already reads the same
