@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 
 /// This copy's version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-const LATEST: &str = "https://api.github.com/repos/songkeys/cc-same/releases/latest";
+const LATEST: &str = "https://api.github.com/repos/larattalabs/cc-same/releases/latest";
 /// Where people can download the latest release themselves.
-pub const DOWNLOADS: &str = "https://github.com/songkeys/cc-same/releases/latest";
+pub const DOWNLOADS: &str = "https://github.com/larattalabs/cc-same/releases/latest";
 /// What changed in each version, as of this build.
 pub const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 /// Given to a freshly installed copy, followed by the process id of the copy it replaces.
@@ -151,7 +151,7 @@ fn client(timeout: Duration) -> anyhow::Result<reqwest::blocking::Client> {
     // ring does the cryptography; installing it a second time changes nothing.
     let _ = rustls::crypto::ring::default_provider().install_default();
     Ok(reqwest::blocking::Client::builder()
-        .user_agent(format!("CC-Same/{VERSION} (+https://github.com/songkeys/cc-same)"))
+        .user_agent(format!("CC-Same/{VERSION} (+https://github.com/larattalabs/cc-same)"))
         .connect_timeout(Duration::from_secs(20))
         .timeout(timeout)
         .build()?)
