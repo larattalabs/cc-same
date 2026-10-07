@@ -105,6 +105,8 @@ enum Phase {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Journal {
+    /// 1 since fingerprints; a journal without one is settled the careful way.
+    version: u32,
     from: Option<String>,
     to: Option<String>,
     phase: Phase,
@@ -219,6 +221,7 @@ impl Live<'_> {
     }
 
     fn save(&self, journal: &Journal) -> Result<()> {
+        self.locks.check()?;
         fsx::create_private_dir_all(&self.ctx.paths.state_dir)?;
         fsx::atomic_write(&journal_path(self.ctx), &serde_json::to_vec_pretty(journal)?, None, false)?;
         Ok(())
@@ -239,6 +242,10 @@ fn follow_with(live: &Live, to: Option<&str>) -> Result<Followed> {
     let Some(to) = to else {
         return Ok(on.map(|on| Followed::Stayed { on }).unwrap_or(Followed::NotSignedIn));
     };
+    if on.is_none() && credentials.as_ref().is_some_and(|c| c.contains_key("claudeAiOauth")) {
+        // A login, but no saying whose: it can be neither kept nor replaced.
+        bail!("Claude Code in the terminal is signed in, but ~/.claude.json does not say to whom; run /login in claude, then switch again");
+    }
     if on.as_deref() == Some(to) {
         // The account signed in never has a copy kept as well.
         live.forget(to)?;
@@ -250,6 +257,7 @@ fn follow_with(live: &Live, to: Option<&str>) -> Result<Followed> {
     }
 
     let mut journal = Journal {
+        version: 1,
         from: on.clone(),
         to: Some(to.to_string()),
         phase: Phase::Started,
@@ -291,6 +299,11 @@ fn settle(live: &Live) -> Result<()> {
 
 /// Take a switch from where its journal says it got to, to done. Each step can be taken again.
 fn settle_with(live: &Live, mut journal: Journal) -> Result<()> {
+    if journal.version < 1 {
+        // From before fingerprints: nothing can be proved, so nothing is put back.
+        stale(live, &journal)?;
+        return done(live);
+    }
     loop {
         let current = live.current()?;
         match journal.phase {
@@ -300,32 +313,35 @@ fn settle_with(live: &Live, mut journal: Journal) -> Result<()> {
                 if let Some(from) = &journal.from {
                     live.forget(from)?;
                 }
-                return remove_journal(live.ctx);
+                return done(live);
             }
             Phase::SetAside if current == journal.original => {
                 // The switch never got to put anything in place.
                 journal.phase = Phase::Undone;
             }
             Phase::SetAside if current == journal.target => {
-                // In place and not used since: finish it, the config too.
+                // In place and not used since: finish it, the config too, from its copy (the
+                // very one).
                 let kept = match &journal.to {
-                    Some(to) if journal.target.is_some() => {
-                        Some(live.kept(to)?.ok_or_else(|| anyhow!("the sign-in put back is gone"))?)
-                    }
+                    Some(to) if journal.target.is_some() => live.kept(to)?,
                     _ => None,
                 };
+                if kept.as_ref().map(|k| fingerprint(&k.credentials)) != journal.target {
+                    stale(live, &journal)?;
+                    return done(live);
+                }
                 live.name(kept.as_ref().map(|k| &k.oauth_account))?;
                 journal.phase = Phase::Committed;
             }
             Phase::Undoing if current == journal.target && current != journal.original => {
-                // Put the login from before back from its copy.
+                // Put the login from before back from its copy, if it is the very one.
                 let kept = match &journal.from {
-                    Some(from) => Some(live.kept(from)?.ok_or_else(|| anyhow!("the sign-in set aside is gone"))?),
+                    Some(from) => live.kept(from)?,
                     None => None,
                 };
                 if kept.as_ref().map(|k| fingerprint(&k.credentials)) != journal.original {
                     stale(live, &journal)?;
-                    return remove_journal(live.ctx);
+                    return done(live);
                 }
                 live.put(kept.as_ref())?;
                 continue;
@@ -335,8 +351,11 @@ fn settle_with(live: &Live, mut journal: Journal) -> Result<()> {
                     Some(from) => live.kept(from)?,
                     None => None,
                 };
-                if let Some(k) = &kept {
-                    live.name(Some(&k.oauth_account))?;
+                match (&journal.from, &kept) {
+                    (Some(_), Some(k)) => live.name(Some(&k.oauth_account))?,
+                    (None, _) => live.name(None)?,
+                    // Its copy is gone already: the config never changed from it.
+                    (Some(_), None) => {}
                 }
                 journal.phase = Phase::Undone;
             }
@@ -344,7 +363,12 @@ fn settle_with(live: &Live, mut journal: Journal) -> Result<()> {
                 // The login in use is neither the one before nor the one put in place: a /login
                 // since, or tokens refreshed. Leave it, and forget what might be stale.
                 stale(live, &journal)?;
-                return remove_journal(live.ctx);
+                return done(live);
+            }
+            Phase::Committed | Phase::Undone if current != expected(&journal) => {
+                // Not what the switch left in place: a /login since, or tokens refreshed.
+                stale(live, &journal)?;
+                return done(live);
             }
             Phase::Committed => {
                 if journal.target.is_some() {
@@ -352,17 +376,31 @@ fn settle_with(live: &Live, mut journal: Journal) -> Result<()> {
                         live.forget(to).context("forgetting the sign-in put back")?;
                     }
                 }
-                return remove_journal(live.ctx);
+                return done(live);
             }
             Phase::Undone => {
                 // The login from before is in use again: its copy goes.
                 if let Some(from) = &journal.from {
                     live.forget(from)?;
                 }
-                return remove_journal(live.ctx);
+                return done(live);
             }
         }
         live.save(&journal)?;
+    }
+}
+
+/// Retire the journal: the switch is settled.
+fn done(live: &Live) -> Result<()> {
+    live.locks.check()?;
+    remove_journal(live.ctx)
+}
+
+/// The login a settled switch leaves in place.
+fn expected(journal: &Journal) -> Option<String> {
+    match journal.phase {
+        Phase::Undone => journal.original.clone(),
+        _ => journal.target.clone(),
     }
 }
 
@@ -772,6 +810,7 @@ mod tests {
             let from = self.on().unwrap().0;
             let target = live.kept(to).unwrap();
             let journal = Journal {
+                version: 1,
                 from: Some(from.clone()),
                 to: Some(to.into()),
                 phase,
@@ -1018,6 +1057,70 @@ mod tests {
         mac.follow(None).unwrap();
         assert_eq!(mac.item().unwrap()["mcpOAuth"]["server"], "R1");
         assert!(mac.journal().is_none());
+    }
+
+    /// Finished, then Ada signed in afresh before the copy put back was forgotten: the old copies
+    /// go, and Ada's new login stays.
+    #[test]
+    fn a_login_after_a_finished_switch_is_never_rolled_back() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::Committed, true);
+        mac.login_as(ADA, "ada after /login");
+        mac.follow(None).unwrap();
+        assert_eq!(mac.on(), on(ADA, "ada after /login"));
+        assert!(mac.kept(ADA).is_none() && mac.kept(GRACE).is_none() && mac.journal().is_none());
+        mac.login(CY);
+        assert_eq!(mac.follow(Some(ADA)).unwrap(), Followed::SignedOut { from: CY.into() });
+    }
+
+    /// An undo whose copy is gone already: settled the careful way, not stuck.
+    #[test]
+    fn an_undo_without_its_copy_is_not_stuck() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::Undoing, true);
+        mac.keychain.delete(KEPT_SERVICE, ADA).unwrap();
+        mac.follow(None).unwrap();
+        assert!(mac.journal().is_none() && mac.kept(GRACE).is_none());
+        assert_eq!(mac.item().unwrap()["claudeAiOauth"]["refreshToken"], format!("refresh of {GRACE}"));
+    }
+
+    /// A login that ~/.claude.json does not name: neither kept nor replaced.
+    #[test]
+    fn a_login_nobody_is_named_for_is_left_alone() {
+        let mac = both();
+        let before = mac.item();
+        fs::remove_file(&mac.ctx.paths.claude_json).unwrap();
+        assert!(mac.follow(Some(GRACE)).is_err());
+        assert_eq!(mac.item(), before);
+        assert!(mac.kept(GRACE).is_some() && mac.journal().is_none());
+    }
+
+    /// A journal from before fingerprints: nothing is put back, copies it touched are forgotten.
+    #[test]
+    fn a_journal_without_fingerprints_is_settled_carefully() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::Committed, true);
+        let old = json!({"from": ADA, "to": GRACE, "phase": "committed"});
+        fsx::atomic_write(&journal_path(&mac.ctx), old.to_string().as_bytes(), None, false).unwrap();
+        mac.follow(None).unwrap();
+        assert!(mac.kept(GRACE).is_none() && mac.kept(ADA).is_none() && mac.journal().is_none());
+    }
+
+    /// Locks taken over meanwhile: the journal is neither written nor removed by the old switch.
+    #[cfg(unix)]
+    #[test]
+    fn a_switch_that_lost_its_locks_leaves_the_journal_be() {
+        let mut mac = both();
+        let lock = mac.tmp.path().join("x.lock");
+        mac.locks = Locks(vec![DirLock::acquire(&lock, Duration::from_secs(60)).unwrap()]);
+        let mine = Journal { version: 1, ..Journal::default() };
+        mac.live().save(&mine).unwrap();
+        fs::remove_dir(&lock).unwrap();
+        fs::create_dir(&lock).unwrap();
+        fs::File::open(&lock).unwrap().set_modified(SystemTime::now() + Duration::from_secs(1)).unwrap();
+        assert!(mac.live().save(&Journal::default()).is_err());
+        assert!(settle_with(&mac.live(), mine.clone()).is_err());
+        assert_eq!(mac.journal(), Some(mine));
     }
 
     // ------------------------------------------------------------ locks
