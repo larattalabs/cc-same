@@ -211,11 +211,14 @@ impl Secrets for Keychain {
         // Copies of the same name elsewhere in the search list (an older one, made before kept
         // copies were pinned to one keychain) would still answer: remove those too.
         let anywhere = Keychain { file: None };
-        for _ in 0..5 {
+        for _ in 0..8 {
             if anywhere.get(service, account)?.is_none() {
                 return Ok(());
             }
             delete(vec!["delete-generic-password", "-a", account, "-s", service])?;
+        }
+        if anywhere.get(service, account)?.is_none() {
+            return Ok(());
         }
         bail!("the keychain still has another copy of it")
     }
