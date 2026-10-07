@@ -200,16 +200,24 @@ impl Secrets for Keychain {
     }
 
     fn delete(&self, service: &str, account: &str) -> Result<()> {
-        let out = security(&self.args(&["delete-generic-password", "-a", account, "-s", service]), None)?;
-        match out.code {
-            Some(0) | Some(NOT_FOUND) => {}
-            code => bail!("removing from the keychain failed ({code:?})"),
+        let delete = |args: Vec<&str>| -> Result<()> {
+            let out = security(&args, None)?;
+            match out.code {
+                Some(0) | Some(NOT_FOUND) => Ok(()),
+                code => bail!("removing from the keychain failed ({code:?})"),
+            }
+        };
+        delete(self.args(&["delete-generic-password", "-a", account, "-s", service]))?;
+        // Copies of the same name elsewhere in the search list (an older one, made before kept
+        // copies were pinned to one keychain) would still answer: remove those too.
+        let anywhere = Keychain { file: None };
+        for _ in 0..5 {
+            if anywhere.get(service, account)?.is_none() {
+                return Ok(());
+            }
+            delete(vec!["delete-generic-password", "-a", account, "-s", service])?;
         }
-        // A second item with the same name, in another keychain of the list, would still answer.
-        if self.get(service, account)?.is_some() {
-            bail!("the keychain still has another copy of it");
-        }
-        Ok(())
+        bail!("the keychain still has another copy of it")
     }
 }
 

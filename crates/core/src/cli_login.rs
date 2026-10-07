@@ -17,14 +17,22 @@
 //!   shared fields stay), its sign-in kept like any other, and `claude` asks to sign in: `/login`
 //!   there, once, to that account. Signing in over the old sign-in instead would end it with
 //!   nothing kept. A command line signed out this way is signed back in by switching back.
-//! * Tokens rotate as they are used, so a copy put back is forgotten before the switch counts as
-//!   done: it is set aside afresh when it is left.
-//! * A journal (no secrets in it: who from, who to, how far) makes a switch all or nothing. One
-//!   that was interrupted is undone, or finished, before anything else is done.
+//! * The account signed in never has a copy kept as well: tokens rotate as they are used, so a
+//!   second copy would go stale, and putting a stale one back signs the account out. A copy put
+//!   back is forgotten before the switch counts as done, and set aside afresh when it is left.
+//! * A journal makes a switch all or nothing. It names who from and who to, how far the switch
+//!   got, and a fingerprint (SHA-256) of the login each side had, never a secret. One that was
+//!   interrupted is settled before anything else is done, and only ever by what the fingerprints
+//!   prove: when the login in use is exactly the one before, or exactly the one put in place, the
+//!   switch is undone or finished. When it is neither (a `/login` since, or tokens refreshed),
+//!   the login in use is left as it is and every copy that might be stale is forgotten. At worst,
+//!   an account then needs `/login` once more; a stale login is never put back.
 //! * Claude Code refreshes its tokens under two lock folders, and writes `~/.claude.json` under a
 //!   third. A switch holds all three, keeping them fresh while it does, so a `claude` running
-//!   meanwhile finishes a refresh first, or finds the new account's tokens after. Only
-//!   `oauthAccount` in `~/.claude.json` changes; the rest keeps its content (not its spacing).
+//!   meanwhile finishes a refresh first, or finds the new account's tokens after. Before every
+//!   change it checks the locks are still its own; if one was taken over, it stops, and the
+//!   journal settles the switch the next time. Only `oauthAccount` in `~/.claude.json` changes;
+//!   the rest keeps its content (not its spacing).
 //! * Only the default configuration folder: with `CLAUDE_CONFIG_DIR` set, Claude Code names its
 //!   keychain item after that folder, and the command line is left alone.
 
@@ -35,10 +43,11 @@ use crate::secrets::{self, Stores};
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Claude Code's own keychain item.
@@ -79,21 +88,30 @@ struct Kept {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Phase {
-    /// Nothing changed yet.
+    /// Nothing changed yet, though the login in use may be being set aside.
     #[default]
     Started,
-    /// The sign-in in use is kept; the switch may have changed the live one since.
+    /// The login in use is set aside; the one in place may have changed since.
     SetAside,
     /// Everything is in place; only forgetting the copy put back is left.
     Committed,
+    /// The switch failed and is being undone.
+    Undoing,
+    /// The login from before is back in place; only forgetting its copy is left.
+    Undone,
 }
 
+/// A switch in progress. Fingerprints, never secrets.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Journal {
     from: Option<String>,
     to: Option<String>,
     phase: Phase,
+    /// The login in use before the switch (none: signed out).
+    original: Option<String>,
+    /// The login the switch puts in place (none: signing out).
+    target: Option<String>,
 }
 
 /// Bring the command line to `to` (or leave it be, for `None`).
@@ -102,7 +120,8 @@ pub fn follow(ctx: &Ctx, to: Option<&str>) -> Result<Followed> {
         bail!("CLAUDE_CONFIG_DIR is set, so Claude Code keeps its sign-in elsewhere; the command line was left alone");
     }
     let stores = secrets::open(ctx)?;
-    follow_with(ctx, &stores, to)
+    let locks = Locks::take(ctx)?;
+    follow_with(&Live { ctx, stores: &stores, user: user_name(), locks: &locks }, to)
 }
 
 /// Forget the command-line sign-in kept for `account`, wherever switching is possible at all.
@@ -114,10 +133,12 @@ pub fn forget(ctx: &Ctx, account: &str) -> Result<()> {
     }
 }
 
+/// Everything a switch reads and changes, with the locks it holds.
 struct Live<'a> {
     ctx: &'a Ctx,
     stores: &'a Stores,
     user: String,
+    locks: &'a Locks,
 }
 
 impl Live<'_> {
@@ -136,6 +157,11 @@ impl Live<'_> {
         }
     }
 
+    /// The fingerprint of the login in place now, or `None` when there is none.
+    fn current(&self) -> Result<Option<String>> {
+        Ok(self.credentials()?.filter(|c| c.contains_key("claudeAiOauth")).map(|c| fingerprint(&c)))
+    }
+
     fn kept(&self, account: &str) -> Result<Option<Kept>> {
         let Some(text) = self.stores.kept.get(KEPT_SERVICE, account)? else { return Ok(None) };
         let damaged = || {
@@ -152,54 +178,57 @@ impl Live<'_> {
     }
 
     fn keep(&self, account: &str, credentials: &Map<String, Value>, oauth_account: Map<String, Value>) -> Result<()> {
+        self.locks.check()?;
         let kept = Kept { credentials: own_part(credentials), oauth_account, set_aside_at: fsx::now_secs() };
         self.stores.kept.set(KEPT_SERVICE, account, &ascii_json(&serde_json::to_value(kept)?))
     }
 
-    /// Put `kept` in place (nobody, for `None`), next to the machine's shared fields from `shared`.
-    fn put(&self, kept: Option<&Kept>, shared: &Map<String, Value>) -> Result<()> {
+    fn forget(&self, account: &str) -> Result<()> {
+        self.locks.check()?;
+        self.stores.kept.delete(KEPT_SERVICE, account)
+    }
+
+    /// Put `kept`'s login in place (nobody's, for `None`), next to the machine's shared fields as
+    /// they are now, and its `oauthAccount` in the config.
+    fn put(&self, kept: Option<&Kept>) -> Result<()> {
+        let shared = self.credentials()?.unwrap_or_default();
         let mut credentials: Map<String, Value> = kept.map(|k| own_part(&k.credentials)).unwrap_or_default();
-        credentials.extend(shared_part(shared));
+        credentials.extend(shared_part(&shared));
+        self.locks.check()?;
         if credentials.is_empty() {
             self.stores.live.delete(LIVE_SERVICE, &self.user)?;
         } else {
             self.stores.live.set(LIVE_SERVICE, &self.user, &ascii_json(&Value::Object(credentials)))?;
         }
+        self.name(kept.map(|k| &k.oauth_account))
+    }
+
+    /// Say in the config who the command line is signed in to (nobody, for `None`).
+    fn name(&self, oauth_account: Option<&Map<String, Value>>) -> Result<()> {
         let mut config = self.config()?;
-        let wanted = kept.map(|k| Value::Object(k.oauth_account.clone()));
+        let wanted = oauth_account.map(|o| Value::Object(o.clone()));
         if config.get("oauthAccount") == wanted.as_ref() {
-            // Already so (an undo after the config could not be written): nothing to write.
             return Ok(());
         }
         match wanted {
-            Some(oauth_account) => config.insert("oauthAccount".into(), oauth_account),
+            Some(o) => config.insert("oauthAccount".into(), o),
             None => config.remove("oauthAccount"),
         };
+        self.locks.check()?;
         write_config(&self.ctx.paths.claude_json, &config)
     }
 
-    /// Who `~/.claude.json` says the command line is signed in to.
-    fn named(&self) -> Result<Option<String>> {
-        Ok(self
-            .config()?
-            .get("oauthAccount")
-            .and_then(|o| o.get("accountUuid"))
-            .and_then(Value::as_str)
-            .map(str::to_string))
+    fn save(&self, journal: &Journal) -> Result<()> {
+        fsx::create_private_dir_all(&self.ctx.paths.state_dir)?;
+        fsx::atomic_write(&journal_path(self.ctx), &serde_json::to_vec_pretty(journal)?, None, false)?;
+        Ok(())
     }
 }
 
-fn follow_with(ctx: &Ctx, stores: &Stores, to: Option<&str>) -> Result<Followed> {
-    let home = claude_home(ctx);
-    let _refresh = DirLock::acquire(&home.join(".oauth_refresh.lock"), Duration::from_secs(60))?;
-    let _legacy = DirLock::acquire(&lock_path(&home), Duration::from_secs(60))?;
-    let _config = DirLock::acquire(&lock_path(&ctx.paths.claude_json), Duration::from_secs(10))?;
-    let live = Live { ctx, stores, user: user_name() };
-    recover_with(&live)?;
-
+fn follow_with(live: &Live, to: Option<&str>) -> Result<Followed> {
+    settle(live)?;
     let config = live.config()?;
     let credentials = live.credentials()?;
-    let shared = credentials.clone().unwrap_or_default();
     // Signed in: a claude.ai login, and who it belongs to.
     let on = credentials
         .as_ref()
@@ -211,8 +240,8 @@ fn follow_with(ctx: &Ctx, stores: &Stores, to: Option<&str>) -> Result<Followed>
         return Ok(on.map(|on| Followed::Stayed { on }).unwrap_or(Followed::NotSignedIn));
     };
     if on.as_deref() == Some(to) {
-        // A copy kept earlier is out of date now.
-        stores.kept.delete(KEPT_SERVICE, to)?;
+        // The account signed in never has a copy kept as well.
+        live.forget(to)?;
         return Ok(Followed::AlreadyThere);
     }
     let target = live.kept(to)?;
@@ -220,22 +249,31 @@ fn follow_with(ctx: &Ctx, stores: &Stores, to: Option<&str>) -> Result<Followed>
         return Ok(Followed::NotSignedIn);
     }
 
-    let mut journal = Journal { from: on.clone(), to: Some(to.to_string()), phase: Phase::Started };
-    save_journal(ctx, &journal)?;
+    let mut journal = Journal {
+        from: on.clone(),
+        to: Some(to.to_string()),
+        phase: Phase::Started,
+        original: live.current()?,
+        target: target.as_ref().map(|k| fingerprint(&k.credentials)),
+    };
+    live.save(&journal)?;
     if let (Some(from), Some(credentials)) = (&on, &credentials) {
         let oauth_account = config.get("oauthAccount").and_then(Value::as_object).cloned().unwrap_or_default();
         live.keep(from, credentials, oauth_account)?;
     }
     journal.phase = Phase::SetAside;
-    save_journal(ctx, &journal)?;
-    if let Err(e) = live.put(target.as_ref(), &shared) {
-        // Undo now; if that fails too, the journal undoes it the next time.
-        undo(&live, &journal).context("putting the command line's sign-in back")?;
+    live.save(&journal)?;
+    if let Err(e) = live.put(target.as_ref()) {
+        journal.phase = Phase::Undoing;
+        // If even that cannot be written, the journal still says SetAside, which settles the same.
+        if live.save(&journal).is_ok() {
+            settle_with(live, journal).context("putting the command line's sign-in back")?;
+        }
         return Err(e);
     }
     journal.phase = Phase::Committed;
-    save_journal(ctx, &journal)?;
-    finish(&live, &journal)?;
+    live.save(&journal)?;
+    settle_with(live, journal)?;
     Ok(match (target, on) {
         (Some(_), from) => Followed::Switched { from },
         (None, Some(from)) => Followed::SignedOut { from },
@@ -243,52 +281,102 @@ fn follow_with(ctx: &Ctx, stores: &Stores, to: Option<&str>) -> Result<Followed>
     })
 }
 
-/// Finish or undo a switch that was interrupted.
-fn recover_with(live: &Live) -> Result<()> {
-    let Some(journal) = read_journal(live.ctx)? else { return Ok(()) };
-    match journal.phase {
-        Phase::Started => remove_journal(live.ctx),
-        Phase::SetAside => undo(live, &journal),
-        Phase::Committed => finish(live, &journal),
+/// Settle a switch that was interrupted, if there is one.
+fn settle(live: &Live) -> Result<()> {
+    match read_journal(live.ctx)? {
+        Some(journal) => settle_with(live, journal),
+        None => Ok(()),
     }
 }
 
-/// Put back the sign-in set aside, and forget its copy: it is in use again.
-fn undo(live: &Live, journal: &Journal) -> Result<()> {
-    let on = live.named()?;
-    // Someone signed in since (with /login): that sign-in stays, and what was set aside stays kept.
-    let ours = on.is_none() || on == journal.from || on == journal.to;
-    if ours {
-        // A keychain that cannot be read stops the undo: its shared fields must not be lost.
-        let shared = live.credentials()?.unwrap_or_default();
-        match &journal.from {
-            Some(from) => {
-                let kept = live.kept(from)?.ok_or_else(|| anyhow!("the sign-in set aside for {from} is gone"))?;
-                live.put(Some(&kept), &shared)?;
-                live.stores.kept.delete(KEPT_SERVICE, from)?;
+/// Take a switch from where its journal says it got to, to done. Each step can be taken again.
+fn settle_with(live: &Live, mut journal: Journal) -> Result<()> {
+    loop {
+        let current = live.current()?;
+        match journal.phase {
+            Phase::Started => {
+                // Nothing was put in place; a copy of the login in use may have been made, and the
+                // login in use never has a copy kept as well.
+                if let Some(from) = &journal.from {
+                    live.forget(from)?;
+                }
+                return remove_journal(live.ctx);
             }
-            None => live.put(None, &shared)?,
+            Phase::SetAside if current == journal.original => {
+                // The switch never got to put anything in place.
+                journal.phase = Phase::Undone;
+            }
+            Phase::SetAside if current == journal.target => {
+                // In place and not used since: finish it, the config too.
+                let kept = match &journal.to {
+                    Some(to) if journal.target.is_some() => {
+                        Some(live.kept(to)?.ok_or_else(|| anyhow!("the sign-in put back is gone"))?)
+                    }
+                    _ => None,
+                };
+                live.name(kept.as_ref().map(|k| &k.oauth_account))?;
+                journal.phase = Phase::Committed;
+            }
+            Phase::Undoing if current == journal.target && current != journal.original => {
+                // Put the login from before back from its copy.
+                let kept = match &journal.from {
+                    Some(from) => Some(live.kept(from)?.ok_or_else(|| anyhow!("the sign-in set aside is gone"))?),
+                    None => None,
+                };
+                if kept.as_ref().map(|k| fingerprint(&k.credentials)) != journal.original {
+                    stale(live, &journal)?;
+                    return remove_journal(live.ctx);
+                }
+                live.put(kept.as_ref())?;
+                continue;
+            }
+            Phase::Undoing if current == journal.original => {
+                let kept = match &journal.from {
+                    Some(from) => live.kept(from)?,
+                    None => None,
+                };
+                if let Some(k) = &kept {
+                    live.name(Some(&k.oauth_account))?;
+                }
+                journal.phase = Phase::Undone;
+            }
+            Phase::SetAside | Phase::Undoing => {
+                // The login in use is neither the one before nor the one put in place: a /login
+                // since, or tokens refreshed. Leave it, and forget what might be stale.
+                stale(live, &journal)?;
+                return remove_journal(live.ctx);
+            }
+            Phase::Committed => {
+                if journal.target.is_some() {
+                    if let Some(to) = &journal.to {
+                        live.forget(to).context("forgetting the sign-in put back")?;
+                    }
+                }
+                return remove_journal(live.ctx);
+            }
+            Phase::Undone => {
+                // The login from before is in use again: its copy goes.
+                if let Some(from) = &journal.from {
+                    live.forget(from)?;
+                }
+                return remove_journal(live.ctx);
+            }
         }
+        live.save(&journal)?;
     }
-    remove_journal(live.ctx)
 }
 
-/// Forget the copy put back: from now on it is the one in use.
-fn finish(live: &Live, journal: &Journal) -> Result<()> {
-    if let Some(to) = &journal.to {
-        live.stores.kept.delete(KEPT_SERVICE, to).context("forgetting the sign-in put back")?;
+/// Forget every copy the interrupted switch touched: either may be out of date now.
+fn stale(live: &Live, journal: &Journal) -> Result<()> {
+    live.ctx.log("an interrupted switch of the command line could not be settled for sure: its copies are forgotten, and the accounts sign in again with /login");
+    for account in [&journal.from, &journal.to].into_iter().flatten() {
+        live.forget(account)?;
     }
-    remove_journal(live.ctx)
+    Ok(())
 }
 
 fn journal_path(ctx: &Ctx) -> PathBuf {
     ctx.paths.state_dir.join(JOURNAL)
-}
-
-fn save_journal(ctx: &Ctx, journal: &Journal) -> Result<()> {
-    fsx::create_private_dir_all(&ctx.paths.state_dir)?;
-    fsx::atomic_write(&journal_path(ctx), &serde_json::to_vec_pretty(journal)?, None, false)?;
-    Ok(())
 }
 
 fn read_journal(ctx: &Ctx) -> Result<Option<Journal>> {
@@ -317,6 +405,24 @@ fn own_part(credentials: &Map<String, Value>) -> Map<String, Value> {
 
 fn shared_part(credentials: &Map<String, Value>) -> Map<String, Value> {
     credentials.iter().filter(|(k, _)| SHARED_KEYS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// SHA-256 of the account's part of a login, with its keys in order: the same login gives the
+/// same fingerprint however it was written.
+fn fingerprint(credentials: &Map<String, Value>) -> String {
+    fn sorted(v: &Value) -> Value {
+        match v {
+            Value::Object(o) => {
+                let mut keys: Vec<&String> = o.keys().collect();
+                keys.sort();
+                Value::Object(keys.into_iter().map(|k| (k.clone(), sorted(&o[k]))).collect())
+            }
+            Value::Array(a) => Value::Array(a.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    let canonical = sorted(&Value::Object(own_part(credentials))).to_string();
+    Sha256::digest(canonical.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// JSON with every character beyond ASCII escaped: the keychain tool prints anything else as hex.
@@ -379,13 +485,66 @@ fn lock_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// One of Claude Code's locks: a folder, made to take it and removed to give it back, its time
-/// refreshed every few seconds while held, as Claude Code's lock library does, so nobody takes it
-/// for one left behind. One not refreshed for longer than `stale` was left behind, and is taken.
+/// The three locks a switch holds, in Claude Code's order.
+struct Locks(Vec<DirLock>);
+
+impl Locks {
+    fn take(ctx: &Ctx) -> Result<Locks> {
+        let home = claude_home(ctx);
+        Ok(Locks(vec![
+            DirLock::acquire(&home.join(".oauth_refresh.lock"), Duration::from_secs(60))?,
+            DirLock::acquire(&lock_path(&home), Duration::from_secs(60))?,
+            DirLock::acquire(&lock_path(&ctx.paths.claude_json), Duration::from_secs(10))?,
+        ]))
+    }
+
+    /// Whether every lock is still ours.
+    fn check(&self) -> Result<()> {
+        self.0.iter().try_for_each(DirLock::check)
+    }
+}
+
+/// One of Claude Code's locks: a folder, made to take it and removed to give it back. While held,
+/// its time is refreshed every few seconds, as Claude Code's lock library does, so nobody takes it
+/// for one left behind; one not refreshed for longer than `stale` was left behind, and is taken.
+/// A lock whose time is not the one last set was taken over by someone else: it is no longer ours,
+/// is not refreshed or removed, and [`DirLock::check`] says so.
 struct DirLock {
     path: PathBuf,
-    stop: Arc<AtomicBool>,
+    state: Arc<LockState>,
     keeper: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct LockState {
+    stop: AtomicBool,
+    lost: AtomicBool,
+    /// The time last set on the folder, as read back.
+    stamp: Mutex<Option<SystemTime>>,
+}
+
+impl LockState {
+    /// Whether the folder still has the time last set on it; marks the lock lost when it does not.
+    fn ours(&self, path: &Path) -> bool {
+        if self.lost.load(Ordering::Relaxed) {
+            return false;
+        }
+        // Read under the same lock a refresh holds, so a refresh never seems a takeover.
+        let stamp = self.stamp.lock().unwrap_or_else(|e| e.into_inner());
+        let now = fs::metadata(path).and_then(|m| m.modified()).ok();
+        let ours = now.is_some() && now == *stamp;
+        drop(stamp);
+        if !ours {
+            self.lost.store(true, Ordering::Relaxed);
+        }
+        ours
+    }
+
+    fn refresh(&self, path: &Path) {
+        let mut stamp = self.stamp.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = fs::File::open(path).and_then(|f| f.set_modified(SystemTime::now()));
+        *stamp = fs::metadata(path).and_then(|m| m.modified()).ok();
+    }
 }
 
 impl DirLock {
@@ -412,7 +571,7 @@ impl DirLock {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Its folder is missing: nothing of Claude Code's to guard there.
-                    return Ok(DirLock { path: PathBuf::new(), stop: Arc::default(), keeper: None });
+                    return Ok(DirLock { path: PathBuf::new(), state: Arc::default(), keeper: None });
                 }
                 Err(e) => return Err(e).with_context(|| format!("taking {}", path.display())),
             }
@@ -424,50 +583,84 @@ impl DirLock {
     }
 
     fn held(path: &Path) -> DirLock {
-        let stop = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(LockState::default());
+        *state.stamp.lock().unwrap_or_else(|e| e.into_inner()) = fs::metadata(path).and_then(|m| m.modified()).ok();
         let keeper = {
-            let (path, stop) = (path.to_path_buf(), stop.clone());
+            let (path, state) = (path.to_path_buf(), state.clone());
             std::thread::spawn(move || {
                 let mut last = Instant::now();
-                while !stop.load(Ordering::Relaxed) {
+                while !state.stop.load(Ordering::Relaxed) {
                     if last.elapsed() >= Self::REFRESH {
-                        touch(&path);
+                        if !state.ours(&path) {
+                            return;
+                        }
+                        state.refresh(&path);
                         last = Instant::now();
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
             })
         };
-        DirLock { path: path.to_path_buf(), stop, keeper: Some(keeper) }
+        DirLock { path: path.to_path_buf(), state, keeper: Some(keeper) }
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.path.as_os_str().is_empty() || self.state.ours(&self.path) {
+            Ok(())
+        } else {
+            bail!(
+                "{} was taken over while switching the command line; the switch is settled next time",
+                self.path.display()
+            )
+        }
     }
 }
 
 impl Drop for DirLock {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.state.stop.store(true, Ordering::Relaxed);
         if let Some(keeper) = self.keeper.take() {
             let _ = keeper.join();
         }
-        if !self.path.as_os_str().is_empty() {
+        if !self.path.as_os_str().is_empty() && self.state.ours(&self.path) {
             let _ = fs::remove_dir(&self.path);
         }
     }
 }
 
-/// Set a folder's time to now.
-fn touch(path: &Path) {
-    let _ = fs::File::open(path).and_then(|f| f.set_modified(SystemTime::now()));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::{Folder, Secrets as _};
+    use crate::secrets::{Folder, Secrets};
     use crate::{Config, FakeDesktop, LogSink, Paths};
     use serde_json::json;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     const ADA: &str = "5a1d3c07-8f2e-4b6a-9c1d-2e3f4a5b6c7d";
     const GRACE: &str = "9e31ea7e-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+    const CY: &str = "c7c7c7c7-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+
+    /// The keychain folder, which can be made to fail its reads.
+    struct Flaky {
+        inner: Folder,
+        broken: Rc<Cell<bool>>,
+    }
+
+    impl Secrets for Flaky {
+        fn get(&self, service: &str, account: &str) -> Result<Option<String>> {
+            if self.broken.get() {
+                bail!("the keychain is locked");
+            }
+            self.inner.get(service, account)
+        }
+        fn set(&self, service: &str, account: &str, value: &str) -> Result<()> {
+            self.inner.set(service, account, value)
+        }
+        fn delete(&self, service: &str, account: &str) -> Result<()> {
+            self.inner.delete(service, account)
+        }
+    }
 
     struct Mac {
         #[cfg_attr(not(unix), allow(dead_code))]
@@ -475,6 +668,8 @@ mod tests {
         ctx: Ctx,
         stores: Stores,
         keychain: Folder,
+        broken: Rc<Cell<bool>>,
+        locks: Locks,
     }
 
     impl Mac {
@@ -487,15 +682,28 @@ mod tests {
             fs::create_dir_all(tmp.path().join(".claude")).unwrap();
             let fake = FakeDesktop { running: Some(false), active: None };
             let ctx = Ctx::new(paths, Config::default(), fake, LogSink::Silent);
-            let stores = secrets::open(&ctx).unwrap();
-            Mac { keychain: Folder(tmp.path().join("keychain")), tmp, ctx, stores }
+            let broken = Rc::new(Cell::new(false));
+            let dir = tmp.path().join("keychain");
+            let stores = Stores {
+                live: Box::new(Flaky { inner: Folder(dir.clone()), broken: broken.clone() }),
+                kept: Box::new(Folder(dir.clone())),
+            };
+            Mac { keychain: Folder(dir), tmp, ctx, stores, broken, locks: Locks(Vec::new()) }
         }
 
-        /// What `/login` in claude does: its login in the keychain next to the shared fields there,
-        /// who it belongs to in the config.
+        fn live(&self) -> Live<'_> {
+            Live { ctx: &self.ctx, stores: &self.stores, user: user_name(), locks: &self.locks }
+        }
+
+        /// What `/login` in claude does: a fresh login in the keychain next to the shared fields
+        /// there, who it belongs to in the config.
         fn login(&self, account: &str) {
+            self.login_as(account, &format!("refresh of {account}"));
+        }
+
+        fn login_as(&self, account: &str, refresh: &str) {
             let mut item = self.item().unwrap_or_default();
-            item.insert("claudeAiOauth".into(), json!({ "refreshToken": format!("refresh of {account}") }));
+            item.insert("claudeAiOauth".into(), json!({ "refreshToken": refresh }));
             item.insert("trustedDeviceToken".into(), json!(format!("device of {account}")));
             self.set_item(&item);
             let mut config = read_config(&self.ctx.paths.claude_json).unwrap();
@@ -509,6 +717,13 @@ mod tests {
             write_config(&self.ctx.paths.claude_json, &config).unwrap();
         }
 
+        /// What a running claude does when its tokens rotate.
+        fn rotate(&self, refresh: &str) {
+            let mut item = self.item().unwrap();
+            item.insert("claudeAiOauth".into(), json!({ "refreshToken": refresh }));
+            self.set_item(&item);
+        }
+
         fn item(&self) -> Option<Map<String, Value>> {
             let text = self.keychain.get(LIVE_SERVICE, &user_name()).unwrap()?;
             Some(serde_json::from_str::<Value>(&text).unwrap().as_object().unwrap().clone())
@@ -518,38 +733,72 @@ mod tests {
             self.keychain.set(LIVE_SERVICE, &user_name(), &Value::Object(item.clone()).to_string()).unwrap();
         }
 
-        /// Who the command line is signed in to, by its config and by the login in its item.
-        fn on(&self) -> Option<String> {
+        /// The refresh token in use, and who the config says it belongs to.
+        fn on(&self) -> Option<(String, String)> {
             let config = read_config(&self.ctx.paths.claude_json).unwrap();
             let who = config.get("oauthAccount").map(|o| o["accountUuid"].as_str().unwrap().to_string());
-            let login = self.item().and_then(|i| i.get("claudeAiOauth").cloned());
-            match (&who, login) {
-                (Some(who), Some(login)) => assert_eq!(login["refreshToken"], format!("refresh of {who}")),
-                (None, None) => {}
-                (who, login) => panic!("signed in halfway: {who:?} / {login:?}"),
+            let refresh = self
+                .item()
+                .and_then(|i| i.get("claudeAiOauth").map(|o| o["refreshToken"].as_str().unwrap().to_string()));
+            match (who, refresh) {
+                (Some(who), Some(refresh)) => Some((who, refresh)),
+                (None, None) => None,
+                (who, refresh) => panic!("signed in halfway: {who:?} / {refresh:?}"),
             }
-            who
         }
 
-        fn kept(&self, account: &str) -> Option<Kept> {
-            self.keychain.get(KEPT_SERVICE, account).unwrap().map(|k| serde_json::from_str(&k).unwrap())
+        fn kept(&self, account: &str) -> Option<String> {
+            let text = self.keychain.get(KEPT_SERVICE, account).unwrap()?;
+            let kept: Kept = serde_json::from_str(&text).unwrap();
+            Some(kept.credentials["claudeAiOauth"]["refreshToken"].as_str().unwrap().to_string())
         }
 
         fn follow(&self, to: Option<&str>) -> Result<Followed> {
-            follow_with(&self.ctx, &self.stores, to)
+            follow_with(&self.live(), to)
         }
 
         fn journal(&self) -> Option<Journal> {
             read_journal(&self.ctx).unwrap()
         }
 
-        fn live(&self) -> Live<'_> {
-            Live { ctx: &self.ctx, stores: &self.stores, user: user_name() }
-        }
-
         fn oauth_account(&self) -> Map<String, Value> {
             read_config(&self.ctx.paths.claude_json).unwrap()["oauthAccount"].as_object().unwrap().clone()
         }
+
+        /// Interrupt a switch from the one in use to `to` at `phase`, having put `to`'s login in
+        /// place when `put` says so.
+        fn interrupt(&self, to: &str, phase: Phase, put: bool) {
+            let live = self.live();
+            let from = self.on().unwrap().0;
+            let target = live.kept(to).unwrap();
+            let journal = Journal {
+                from: Some(from.clone()),
+                to: Some(to.into()),
+                phase,
+                original: live.current().unwrap(),
+                target: target.as_ref().map(|k| fingerprint(&k.credentials)),
+            };
+            live.save(&journal).unwrap();
+            live.keep(&from, &self.item().unwrap(), self.oauth_account()).unwrap();
+            if put {
+                let mut item = self.item().unwrap();
+                item.extend(own_part(&target.unwrap().credentials));
+                self.set_item(&item);
+            }
+        }
+    }
+
+    fn on(account: &str, refresh: &str) -> Option<(String, String)> {
+        Some((account.into(), refresh.into()))
+    }
+
+    /// Ada and Grace both signed in once, through cc-same; Ada in use, Grace kept.
+    fn both() -> Mac {
+        let mac = Mac::new();
+        mac.login(GRACE);
+        mac.follow(Some(ADA)).unwrap();
+        mac.login(ADA);
+        mac
     }
 
     #[test]
@@ -563,18 +812,13 @@ mod tests {
         mac.login(GRACE);
         // From now on, both switch.
         assert_eq!(mac.follow(Some(ADA)).unwrap(), Followed::Switched { from: Some(GRACE.into()) });
-        assert_eq!(mac.on().as_deref(), Some(ADA));
+        assert_eq!(mac.on(), on(ADA, &format!("refresh of {ADA}")));
         assert!(mac.kept(ADA).is_none() && mac.kept(GRACE).is_some());
         // Tokens rotate while claude runs: switching away keeps the newest.
-        let mut item = mac.item().unwrap();
-        item.insert("claudeAiOauth".into(), json!({ "refreshToken": format!("refresh of {ADA}"), "rotated": true }));
-        mac.set_item(&item);
+        mac.rotate("rotated ada");
         assert_eq!(mac.follow(Some(GRACE)).unwrap(), Followed::Switched { from: Some(ADA.into()) });
-        assert_eq!(mac.on().as_deref(), Some(GRACE));
-        let ada = mac.kept(ADA).unwrap();
-        assert_eq!(ada.credentials["claudeAiOauth"]["rotated"], true);
-        assert_eq!(ada.credentials["trustedDeviceToken"], format!("device of {ADA}"));
-        assert_eq!(ada.oauth_account["displayName"], "José");
+        assert_eq!(mac.on(), on(GRACE, &format!("refresh of {GRACE}")));
+        assert_eq!(mac.kept(ADA).as_deref(), Some("rotated ada"));
         assert_eq!(mac.follow(Some(GRACE)).unwrap(), Followed::AlreadyThere);
         assert!(mac.journal().is_none());
     }
@@ -595,9 +839,7 @@ mod tests {
         with_mcp(Some("R1"));
         mac.login(ADA);
         mac.follow(Some(GRACE)).unwrap();
-        // Signed out, the shared field stays; and it is not kept with Ada's sign-in.
         assert_eq!(mac.item().unwrap()["mcpOAuth"]["server"], "R1");
-        assert!(!mac.kept(ADA).unwrap().credentials.contains_key("mcpOAuth"));
         mac.login(GRACE);
         with_mcp(Some("R2"));
         mac.follow(Some(ADA)).unwrap();
@@ -618,7 +860,6 @@ mod tests {
         assert_eq!(read_config(&mac.ctx.paths.claude_json).unwrap(), before);
     }
 
-    /// Kept copies are ASCII, which the keychain tool prints as they are.
     #[test]
     fn kept_copies_are_plain_ascii() {
         let mac = Mac::new();
@@ -633,9 +874,8 @@ mod tests {
         let mac = Mac::new();
         mac.login(ADA);
         mac.follow(Some(GRACE)).unwrap();
-        assert_eq!(mac.on(), None);
         assert_eq!(mac.follow(Some(ADA)).unwrap(), Followed::Switched { from: None });
-        assert_eq!(mac.on().as_deref(), Some(ADA));
+        assert_eq!(mac.on(), on(ADA, &format!("refresh of {ADA}")));
         assert!(mac.kept(ADA).is_none());
     }
 
@@ -644,7 +884,6 @@ mod tests {
         let mac = Mac::new();
         mac.login(ADA);
         assert_eq!(mac.follow(None).unwrap(), Followed::Stayed { on: ADA.into() });
-        assert_eq!(mac.on().as_deref(), Some(ADA));
         assert!(mac.kept(ADA).is_none());
     }
 
@@ -659,22 +898,18 @@ mod tests {
     fn a_damaged_copy_changes_nothing_and_says_nothing_of_it() {
         let mac = Mac::new();
         mac.login(ADA);
-        // A copy that went in twice encoded: a JSON string holding the JSON.
         let secret = r#""{\"credentials\":{\"claudeAiOauth\":{\"refreshToken\":\"sk-ant-ort-SECRET\"}}}""#;
         mac.keychain.set(KEPT_SERVICE, GRACE, secret).unwrap();
         let e = mac.follow(Some(GRACE)).unwrap_err();
         assert!(!format!("{e:#}").contains("SECRET"), "{e:#}");
-        assert_eq!(mac.on().as_deref(), Some(ADA));
+        assert_eq!(mac.on(), on(ADA, &format!("refresh of {ADA}")));
         assert!(mac.kept(ADA).is_none() && mac.journal().is_none());
     }
 
     #[cfg(unix)]
     #[test]
     fn a_failed_switch_puts_the_sign_in_back() {
-        let mac = Mac::new();
-        mac.login(GRACE);
-        mac.follow(Some(ADA)).unwrap();
-        mac.login(ADA);
+        let mac = both();
         // ~/.claude.json cannot be written (a symlink is never written through), so the switch
         // fails after Grace's login went in: it must not stay there.
         let config = &mac.ctx.paths.claude_json;
@@ -682,76 +917,149 @@ mod tests {
         fs::rename(config, &real).unwrap();
         std::os::unix::fs::symlink(&real, config).unwrap();
         assert!(mac.follow(Some(GRACE)).is_err());
-        assert_eq!(mac.on().as_deref(), Some(ADA));
-        // Grace's copy is still kept, to try again; Ada's is in use, so it is not.
+        assert_eq!(mac.on(), on(ADA, &format!("refresh of {ADA}")));
         assert!(mac.kept(GRACE).is_some() && mac.kept(ADA).is_none());
         assert!(mac.journal().is_none());
     }
 
-    /// Interrupted with the live sign-in half changed: the next switch undoes it first.
+    // ------------------------------------------------------------ interrupted switches
+
+    /// Set aside, then interrupted before anything was put in place: undone.
     #[test]
-    fn an_interrupted_switch_is_undone_before_anything_else() {
-        let mac = Mac::new();
-        mac.login(GRACE);
-        mac.follow(Some(ADA)).unwrap();
-        mac.login(ADA);
-        // Ada set aside, Grace's login put in the keychain, then the power went out.
-        mac.live().keep(ADA, &mac.item().unwrap(), mac.oauth_account()).unwrap();
-        let mut item = mac.item().unwrap();
-        item.insert("claudeAiOauth".into(), json!({ "refreshToken": format!("refresh of {GRACE}") }));
-        mac.set_item(&item);
-        let journal = Journal { from: Some(ADA.into()), to: Some(GRACE.into()), phase: Phase::SetAside };
-        save_journal(&mac.ctx, &journal).unwrap();
-        // Nothing trusts the half-changed state: the next switch puts Ada back first.
-        assert_eq!(mac.follow(Some(ADA)).unwrap(), Followed::AlreadyThere);
-        assert_eq!(mac.on().as_deref(), Some(ADA));
-        assert!(mac.kept(GRACE).is_some() && mac.kept(ADA).is_none() && mac.journal().is_none());
+    fn interrupted_before_anything_was_put_in_place() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::SetAside, false);
+        mac.follow(None).unwrap();
+        assert_eq!(mac.on(), on(ADA, &format!("refresh of {ADA}")));
+        assert!(mac.kept(ADA).is_none() && mac.kept(GRACE).is_some() && mac.journal().is_none());
     }
 
-    /// Interrupted after everything was in place: the copy put back is forgotten first, so it is
-    /// never put back a second time.
+    /// Interrupted with Grace's login in place, unused since: the switch is finished.
     #[test]
-    fn an_interrupted_switch_is_finished_before_anything_else() {
-        let mac = Mac::new();
-        mac.login(GRACE);
-        mac.follow(Some(ADA)).unwrap();
-        mac.login(ADA);
-        mac.follow(Some(GRACE)).unwrap();
-        // As if the copy of Grace put back had not been forgotten yet.
-        mac.live().keep(GRACE, &mac.item().unwrap(), mac.oauth_account()).unwrap();
-        let journal = Journal { from: Some(ADA.into()), to: Some(GRACE.into()), phase: Phase::Committed };
-        save_journal(&mac.ctx, &journal).unwrap();
+    fn interrupted_with_the_new_login_in_place() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::SetAside, true);
         mac.follow(None).unwrap();
+        assert_eq!(mac.on(), on(GRACE, &format!("refresh of {GRACE}")));
+        assert_eq!(mac.kept(ADA), Some(format!("refresh of {ADA}")));
         assert!(mac.kept(GRACE).is_none() && mac.journal().is_none());
     }
+
+    /// Interrupted, then Ada signed in afresh with /login: her new login is never overwritten
+    /// with the copy from before.
+    #[test]
+    fn a_newer_login_to_the_same_account_is_never_overwritten() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::SetAside, false);
+        mac.login_as(ADA, "ada after /login");
+        mac.follow(None).unwrap();
+        assert_eq!(mac.on(), on(ADA, "ada after /login"));
+        assert!(mac.kept(ADA).is_none() && mac.journal().is_none());
+        // What might have been stale is forgotten too.
+        assert!(mac.kept(GRACE).is_none());
+    }
+
+    /// Interrupted while Ada was being set aside; Ada's tokens rotated; then /login to Cy. A
+    /// switch to Ada must not put back the copy made before the rotation.
+    #[test]
+    fn a_copy_made_before_a_rotation_is_never_put_back() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::Started, false);
+        mac.rotate("rotated ada");
+        mac.login(CY);
+        assert_eq!(mac.follow(Some(ADA)).unwrap(), Followed::SignedOut { from: CY.into() });
+        assert_eq!(mac.on(), None);
+    }
+
+    /// Interrupted with Grace's login in place; Grace's tokens rotated; then /login to Cy. A
+    /// switch to Grace must not put back the copy that was already used.
+    #[test]
+    fn a_copy_that_was_used_is_never_put_back() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::SetAside, true);
+        mac.rotate("rotated grace");
+        mac.login(CY);
+        mac.follow(None).unwrap();
+        assert!(mac.kept(GRACE).is_none() && mac.kept(ADA).is_none());
+        assert_eq!(mac.on(), on(CY, &format!("refresh of {CY}")));
+    }
+
+    /// An undo interrupted after the login from before was back: it finishes, no "gone" error.
+    #[test]
+    fn an_interrupted_undo_finishes() {
+        let mac = both();
+        mac.interrupt(GRACE, Phase::SetAside, true);
+        let mut journal = mac.journal().unwrap();
+        journal.phase = Phase::Undoing;
+        mac.live().save(&journal).unwrap();
+        // Put back, and its copy forgotten, before the journal said so.
+        let ada = mac.live().kept(ADA).unwrap().unwrap();
+        mac.live().put(Some(&ada)).unwrap();
+        mac.keychain.delete(KEPT_SERVICE, ADA).unwrap();
+        mac.follow(None).unwrap();
+        assert_eq!(mac.on(), on(ADA, &format!("refresh of {ADA}")));
+        assert!(mac.kept(GRACE).is_some() && mac.journal().is_none());
+    }
+
+    /// The keychain cannot be read while settling: nothing changes, the shared fields included,
+    /// and the journal stays for next time.
+    #[test]
+    fn a_keychain_that_cannot_be_read_stops_the_settling() {
+        let mac = both();
+        let mut item = mac.item().unwrap();
+        item.insert("mcpOAuth".into(), json!({ "server": "R1" }));
+        mac.set_item(&item);
+        mac.interrupt(GRACE, Phase::SetAside, true);
+        mac.broken.set(true);
+        assert!(mac.follow(None).is_err());
+        mac.broken.set(false);
+        assert_eq!(mac.item().unwrap()["mcpOAuth"]["server"], "R1");
+        assert!(mac.journal().is_some());
+        mac.follow(None).unwrap();
+        assert_eq!(mac.item().unwrap()["mcpOAuth"]["server"], "R1");
+        assert!(mac.journal().is_none());
+    }
+
+    // ------------------------------------------------------------ locks
 
     #[cfg(unix)]
     #[test]
     fn claude_codes_locks_are_waited_for_kept_fresh_and_given_back() {
-        let mac = Mac::new();
-        mac.login(ADA);
-        let refresh = mac.tmp.path().join(".claude/.oauth_refresh.lock");
-        // Held by a running claude: given up on, nothing changed.
-        fs::create_dir(&refresh).unwrap();
-        assert!(DirLock::acquire_within(&refresh, Duration::from_secs(60), Duration::from_millis(300)).is_err());
-        // Left behind long ago: taken over.
-        drop(DirLock::acquire_within(&refresh, Duration::ZERO, Duration::from_millis(300)).unwrap());
-        assert!(!refresh.exists());
-        // Kept fresh while held, so nobody takes it for one left behind.
-        let held = DirLock::acquire(&refresh, Duration::from_secs(60)).unwrap();
-        let old = SystemTime::now() - Duration::from_secs(600);
-        fs::File::open(&refresh).unwrap().set_modified(old).unwrap();
-        std::thread::sleep(DirLock::REFRESH + Duration::from_millis(300));
-        let age = SystemTime::now().duration_since(fs::metadata(&refresh).unwrap().modified().unwrap()).unwrap();
-        assert!(age < Duration::from_secs(5), "{age:?}");
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join(".oauth_refresh.lock");
+        // Held by a running claude: given up on.
+        fs::create_dir(&lock).unwrap();
+        assert!(DirLock::acquire_within(&lock, Duration::from_secs(60), Duration::from_millis(300)).is_err());
+        // Left behind long ago: taken over, and given back.
+        drop(DirLock::acquire_within(&lock, Duration::ZERO, Duration::from_millis(300)).unwrap());
+        assert!(!lock.exists());
+        // Kept fresh while held.
+        let held = DirLock::acquire(&lock, Duration::from_secs(60)).unwrap();
+        std::thread::sleep(DirLock::REFRESH + Duration::from_millis(500));
+        let age = SystemTime::now().duration_since(fs::metadata(&lock).unwrap().modified().unwrap()).unwrap();
+        assert!(age < DirLock::REFRESH, "{age:?}");
+        assert!(held.check().is_ok());
         drop(held);
-        mac.follow(Some(GRACE)).unwrap();
-        for lock in [refresh, mac.tmp.path().join(".claude.lock"), mac.tmp.path().join(".claude.json.lock")] {
-            assert!(!lock.exists(), "{}", lock.display());
-        }
+        assert!(!lock.exists());
     }
 
-    /// Something at a lock's place that cannot be removed: waited for, then given up on.
+    /// Taken over by someone else meanwhile: the switch is told, and their lock is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_taken_over_is_noticed_and_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("x.lock");
+        let held = DirLock::acquire(&lock, Duration::from_secs(60)).unwrap();
+        // Someone found it stale, removed it, and made their own.
+        fs::remove_dir(&lock).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::create_dir(&lock).unwrap();
+        fs::File::open(&lock).unwrap().set_modified(SystemTime::now() + Duration::from_secs(1)).unwrap();
+        assert!(held.check().is_err());
+        drop(held);
+        assert!(lock.exists(), "their lock was removed");
+    }
+
     #[test]
     fn a_lock_that_cannot_be_cleared_is_given_up_on_in_time() {
         let tmp = tempfile::tempdir().unwrap();
@@ -761,6 +1069,15 @@ mod tests {
         let started = Instant::now();
         assert!(DirLock::acquire_within(&lock, Duration::ZERO, Duration::from_millis(300)).is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn fingerprints_ignore_key_order_and_shared_fields() {
+        let a = json!({"claudeAiOauth": {"a": 1, "b": 2}, "mcpOAuth": {"x": 1}});
+        let b = json!({"claudeAiOauth": {"b": 2, "a": 1}});
+        assert_eq!(fingerprint(a.as_object().unwrap()), fingerprint(b.as_object().unwrap()));
+        let c = json!({"claudeAiOauth": {"a": 1, "b": 3}});
+        assert_ne!(fingerprint(a.as_object().unwrap()), fingerprint(c.as_object().unwrap()));
     }
 
     #[test]

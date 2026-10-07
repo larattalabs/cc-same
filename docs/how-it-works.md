@@ -198,10 +198,14 @@ sign-ins of MCP servers and plugins (`mcpOAuth`, `mcpOAuthClientConfig`, `mcpXaa
    every 2 seconds while held, as Claude Code's lock library does. A `claude` running meanwhile
    finishes a refresh first, or finds the new account's tokens after it. A lock not refreshed for
    longer than Claude Code's own limit (60 and 10 seconds) was left behind and is taken over.
-2. A journal in `<state>/cli-switch.json` (who from, who to, how far; no secrets) is written
-   before each step that changes something. A switch that was interrupted is undone, or
-   finished, before anything else is done, unless someone has signed in with `/login` since:
-   that sign-in stays, and what was set aside stays kept.
+2. A journal in `<state>/cli-switch.json` is written before each step that changes something.
+   It names who from and who to, how far the switch got, and a fingerprint (SHA-256) of the
+   login each side had; never a secret. A switch that was interrupted is settled before anything
+   else is done, and only by what the fingerprints prove. When the login in use is exactly the
+   one from before, or exactly the one being put in place, the switch is undone or finished.
+   When it is neither (a `/login` since, or tokens refreshed), the login in use stays as it is,
+   and every copy that switch touched is forgotten, since it may be out of date. At worst an
+   account then needs `/login` once more; an out-of-date login is never put back.
 3. The account's part of the sign-in in use, whoever it belongs to, is set aside in the login
    keychain under `cc-same CLI sign-in` and the account's ID, with its `oauthAccount`.
 4. The part kept for the account Claude switched to goes back into `Claude Code-credentials`,
@@ -211,9 +215,9 @@ sign-ins of MCP servers and plugins (`mcpOAuth`, `mcpOAuthClientConfig`, `mcpXaa
    is removed instead and the shared fields stay: `claude` asks you to sign in. Signing in over
    the old sign-in instead would have ended it with nothing kept. Switching back signs it in again.
 5. The copy put back is forgotten before the switch counts as done: tokens rotate as they are
-   used, so it is set aside afresh when it is left. If a step before that fails, the sign-in in
-   use goes back where it was, now or at the next switch; if forgetting the copy fails, the next
-   switch forgets it first.
+   used, so it is set aside afresh when it is left: the account signed in never has a copy kept
+   as well. If a step fails, the switch is settled as above, now or at the next switch. Before
+   every change the locks are checked to still be its own; one taken over stops the switch.
 
 Secrets go through `/usr/bin/security`, as hex on its standard input, never on a command line,
 and are read back after writing. Kept copies are JSON with everything beyond ASCII escaped, since
