@@ -12,6 +12,14 @@ Settings › Updates.
   now says so, since what you run in the terminal counts against the other account's plan (when it
   uses that login rather than an API key or a cloud provider). With `CLAUDE_CONFIG_DIR` set, CC Same now reads Claude Code's config from
   that folder, as Claude Code does.
+- **What stays with each account.** Connectors, the plugins an organization hands out and the
+  artifacts you publish belong to one account, so they don't travel with your sessions.
+  `cc-same inventory` lists them per account, with what each account lacks that another has.
+  After `cc-same switch`, CC Same names what hasn't been seen on the new account yet, and how many
+  artifacts stay with the one you left (another account can update one only once it's shared with
+  edit access). It reads what Claude left on disk and asks Anthropic nothing, so connectors are the
+  ones seen in each account's sessions, not a check of what is connected now, and anything it
+  couldn't read is counted rather than taken for "none".
 
 ## 0.1.10 - 2026-10-05
 
